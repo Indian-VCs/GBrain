@@ -1992,7 +1992,7 @@ export class PostgresEngine implements BrainEngine {
   async traverseGraph(
     slug: string,
     depth: number = 5,
-    opts?: { sourceId?: string; sourceIds?: string[] },
+    opts?: import('./engine.ts').TraverseGraphOpts,
   ): Promise<GraphNode[]> {
     const sql = this.sql;
     // v0.34.1 (#861 — P0 leak seal): scope visited nodes to the caller's
@@ -2018,6 +2018,31 @@ export class PostgresEngine implements BrainEngine {
       : opts?.sourceId
         ? sql`AND p3.source_id = ${opts.sourceId}`
         : sql``;
+    // T8 (v0.36+): frontier cap. When set, the recursive term applies a
+    // parenthesized LIMIT N with ORDER BY (slug, id) for stable selection.
+    // Postgres' parenthesized-LIMIT inside a recursive term caps per
+    // ITERATION, which maps approximately to per-BFS-LAYER (the mapping is
+    // exact when fanout is bounded; for hub-fanout graphs the cap fires
+    // early). Post-query, count rows per depth — if any depth == cap, fire
+    // the truncation callback.
+    const cap = opts?.frontierCap;
+    const recursiveStep = cap !== undefined && cap > 0
+      ? sql`(SELECT p2.id, p2.slug, p2.title, p2.type, g.depth + 1, g.visited || p2.id
+             FROM graph g
+             JOIN links l ON l.from_page_id = g.id
+             JOIN pages p2 ON p2.id = l.to_page_id
+             WHERE g.depth < ${depth}
+               AND NOT (p2.id = ANY(g.visited))
+               ${stepScope}
+             ORDER BY p2.slug ASC, p2.id ASC
+             LIMIT ${cap})`
+      : sql`SELECT p2.id, p2.slug, p2.title, p2.type, g.depth + 1, g.visited || p2.id
+            FROM graph g
+            JOIN links l ON l.from_page_id = g.id
+            JOIN pages p2 ON p2.id = l.to_page_id
+            WHERE g.depth < ${depth}
+              AND NOT (p2.id = ANY(g.visited))
+              ${stepScope}`;
     // Cycle prevention: visited array tracks page IDs already in the path.
     const rows = await sql`
       WITH RECURSIVE graph AS (
@@ -2026,13 +2051,7 @@ export class PostgresEngine implements BrainEngine {
 
         UNION ALL
 
-        SELECT p2.id, p2.slug, p2.title, p2.type, g.depth + 1, g.visited || p2.id
-        FROM graph g
-        JOIN links l ON l.from_page_id = g.id
-        JOIN pages p2 ON p2.id = l.to_page_id
-        WHERE g.depth < ${depth}
-          AND NOT (p2.id = ANY(g.visited))
-          ${stepScope}
+        ${recursiveStep}
       )
       SELECT DISTINCT g.slug, g.title, g.type, g.depth,
         coalesce(
@@ -2052,6 +2071,12 @@ export class PostgresEngine implements BrainEngine {
       FROM graph g
       ORDER BY g.depth, g.slug
     `;
+
+    // T8 truncation-detection callback was designed here but the v1 algorithm
+    // had both false-positive (organic count == cap) and false-negative
+    // (LIMIT-before-DISTINCT in diamond graphs) cases caught by adversarial
+    // review. Stripped pending the dedupe-then-cap SQL rewrite + real Postgres
+    // parity coverage. See TODOS.md → "T8 truncation signal".
 
     return rows.map((r: Record<string, unknown>) => ({
       slug: r.slug as string,

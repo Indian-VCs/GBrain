@@ -22,6 +22,32 @@ import type {
  * shape on both engines (Postgres has had it since v0.18; PGLite gets it
  * via migration v36).
  */
+/**
+ * Options for `traverseGraph`.
+ *
+ * `frontierCap`: when set, the BFS recursive term applies a parenthesized
+ * `LIMIT N ORDER BY slug,id` so each iteration emits at most N rows. This
+ * is the "approximately per-layer" cap discussed in the T8 plan — Postgres'
+ * recursive CTE caps per ITERATION, not strictly per BFS LAYER (BFS layer
+ * boundaries map to recursive iterations only when fan-out is bounded).
+ * For hub-fanout graphs the cap fires early and bounds the work. Default:
+ * unset = no cap (back-compat; existing callers see no change).
+ *
+ * NOTE: a truncation-detection signal (`onTruncation` callback) was
+ * designed but the v1 algorithm had both false-positive (organic count ==
+ * cap) and false-negative (LIMIT-before-DISTINCT in diamond graphs) cases
+ * caught by adversarial review. The signal is deferred until a
+ * dedupe-then-cap SQL rewrite + real Postgres parity coverage lands. See
+ * TODOS.md → "T8 truncation signal" entry. Callers that need to detect
+ * truncation can compare `result.length` against expected fanout bounds
+ * as a coarse-but-honest signal in the interim.
+ */
+export interface TraverseGraphOpts {
+  sourceId?: string;
+  sourceIds?: string[];
+  frontierCap?: number;
+}
+
 export interface FileRow {
   id: number;
   source_id: string;
@@ -765,7 +791,7 @@ export interface BrainEngine {
   traverseGraph(
     slug: string,
     depth?: number,
-    opts?: { sourceId?: string; sourceIds?: string[] },
+    opts?: TraverseGraphOpts,
   ): Promise<GraphNode[]>;
   /**
    * Edge-based graph traversal with optional type and direction filters.

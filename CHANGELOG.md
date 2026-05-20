@@ -2,6 +2,101 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.37.4.0] - 2026-05-20
+
+**A nightly safety net for the bug class that bit gbrain 10 times in 2 years.**
+**Plus a graph cap so a hub person with 500 connections can't make `traverseGraph` blow up.**
+
+The 10+ forward-reference bugs documented in CLAUDE.md (#239 / #243 / #266 / #357 / #366 / #374 / #375 / #378 / #395 / #396) all shipped the same way: a new release added a column to the schema blob, an old user's brain didn't have that column, and `gbrain upgrade` wedged on `column "..." does not exist`. We always caught these in production. This release ports a CI pattern from pgGraph (a sibling pgrx extension) that catches the next member of that bug class before users hit it — by walking a simulated-legacy brain forward to head on every nightly CI run, against real Postgres.
+
+The same wave adds an opt-in cap on `traverseGraph` for hub-fanout protection, a property-based fuzz harness for the trust-boundary validators, and a memory budget gate that probes peak RSS during a synthetic workload. None of it changes default behavior; everything that touches production code is back-compat.
+
+### What landed
+
+| Piece | What it catches | How it runs |
+|---|---|---|
+| **Schema-migration matrix** | Walk-forward wedges from any historical brain shape (pre-v0.13 + pre-v0.18 seeded; extensible to any earlier shape) | `bash tests/heavy/pg_upgrade_matrix.sh` — Postgres-only, ~4s for both shapes |
+| **Fuzz harness for trust-boundary validators** | Edge-case crashes in `validatePageSlug`, `validateFilename`, `escapeLikePattern`, `parseFactsFence`, plus property tests for `splitBody`, `slugifyPath`, `sanitizeQueryForPrompt`, `validateUploadPath` | `bun test test/fuzz/` (runs in default `bun test`, ~3s for 1000 inputs × 8 properties) |
+| **RSS budget gate** | Peak RSS regressions over a 200-page synthetic workload, baseline-vs-now delta | `bash tests/heavy/measure_rss.sh` — Linux-only baseline refresh, informational on macOS |
+| **Read-latency-under-sync** | Search p99 degradation while writes hammer the engine | `bash tests/heavy/read_latency_under_sync.sh` |
+| **Sync lock regression** | One winner + N-1 lock-busy + zero leaked `gbrain_cycle_locks` rows under concurrent `gbrain sync` (real semantics — losers fail fast, they don't queue) | `bash tests/heavy/sync_lock_regression.sh` — Postgres-only |
+| **`tests/heavy/` convention** | Home for ops-shape scripts that don't fit `*.slow.test.ts` (per-file unit-shape) | `bun run test:heavy` runs the directory sequentially |
+| **Nightly + opt-in CI workflow** | Runs the whole heavy suite at 08:17 UTC daily AND on any PR tagged `heavy-tests`, with Postgres service + artifact upload on failure | `.github/workflows/heavy-tests.yml` |
+| **BFS frontier cap on `traverseGraph`** | Hub-person fan-out blowing up at depth ≥ 2 (back-compat opt-in via new `frontierCap` knob) | `engine.traverseGraph(slug, depth, { frontierCap: 500 })` |
+
+### How to turn it on
+
+The heavy suite is opt-in. To run locally:
+
+```bash
+# Spin up Postgres for the Postgres-only tests:
+docker run -d --name gbrain-test-pg \
+  -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=gbrain_test -p 5434:5432 pgvector/pgvector:pg16
+export DATABASE_URL=postgresql://postgres:postgres@localhost:5434/gbrain_test
+bun run test:heavy
+```
+
+For the frontier cap, opt in per call:
+
+```ts
+const nodes = await engine.traverseGraph('alice', 3, { frontierCap: 500 });
+// nodes.length is bounded — that's the protection. A truncation-signal
+// callback was designed but stripped pre-merge; see "what's safe to know"
+// below for the deferral.
+```
+
+### What's safe to know about
+
+- **Default behavior unchanged.** No call to `traverseGraph` sees different results unless they pass `frontierCap`. The `traverse_graph` MCP wire shape (Array of nodes, not a struct) is preserved — external clients keep working.
+- **`onTruncation` callback stripped pre-merge.** The original plan called for a callback that fired when the cap dropped nodes. /review caught two bugs in the v1 algorithm: false positives when a graph organically has exactly `cap` unique nodes at some depth, and false negatives in diamond graphs because the recursive `LIMIT N` ran before the outer `SELECT DISTINCT`. Rather than ship a signal callers couldn't trust, we cut it. The cap itself (the actually-useful frontier protection) ships clean; the signal returns in a follow-up wave once a dedupe-then-cap SQL rewrite + Postgres parity E2E land. Tracked in TODOS.md → "T8 truncation signal".
+- **`tests/heavy/` isn't in `bun test`.** The runner stays fast (8 shards, ~6 minutes). The heavy stuff runs nightly or on label.
+- **RSS baseline is empty on first commit.** The first Linux CI nightly populates it via `tests/heavy/measure_rss.sh --refresh-baseline`. Until then every measurement is informational. The macOS fallback path is `process.memoryUsage().rss` (VmRSS, mmap-inflated) — the gate refuses to write a baseline from a macOS run by design.
+- **Fuzz purity is bundle-verified.** `scripts/check-fuzz-purity.sh` runs in `verify`. It bundles each pure-target file via `bun build --target=bun` and greps for `node:fs` / `node:child_process` / engine imports. Source-grep can be fooled by transitive imports; the bundle can't.
+
+### What we caught and fixed before merging
+
+Three review passes ran on the plan before any code: a CEO scope review (Approach C, full sweep, 9 tasks), an Eng dual-voice review (Claude subagent + Codex), and a Codex 2nd-pass verifier against the revised plan. The 2nd pass caught issues the first two missed:
+
+- The fuzz purity guard's `require.cache` snapshot would have been theatrical under Bun's ESM loader. Swapped to bun-bundle-then-grep, which catches transitive impurity. Five proposed pure targets turned out to transitively import `fs` (validator-shaped functions living in modules that pull in helpers that import fs); they moved to `mixed-validators.test.ts` with property tests but no purity guarantee. Only `escapeLikePattern` and `parseFactsFence` are bundle-pure.
+- The first-pass T8 design stored truncation metadata on the engine instance. Concurrent traversals would have stomped each other's metadata. Switched to a per-call `onTruncation` callback — each call's closure is independent.
+- The first-pass T3 design proposed committing a 50K-page PGLite fixture to the repo. Repo-size risk + contradicted T1's no-blobs principle. Switched to in-process synthesis (200 pages by default; configurable up).
+- Three reviewers caught the original `LIMIT N PARTITION BY depth` SQL as not-actually-valid syntax. Real shape is parenthesized `LIMIT N ORDER BY (slug, id)` inside the recursive term, with `DISTINCT ON` post-dedupe.
+
+### Itemized changes
+
+#### Engine (production code)
+
+- `src/core/engine.ts` — new export `TraverseGraphOpts`. `traverseGraph(slug, depth, opts?)` opts widen to include `frontierCap?: number`. Return type unchanged (`Promise<GraphNode[]>`).
+- `src/core/postgres-engine.ts` — recursive CTE in `traverseGraph` adds parenthesized `LIMIT N ORDER BY p2.slug ASC, p2.id ASC` inside the recursive term when `frontierCap` is set.
+- `src/core/pglite-engine.ts` — same shape, same SQL, positional params.
+
+#### Heavy tests (new directory)
+
+- `tests/heavy/pg_upgrade_matrix.sh` + `tests/heavy/_build_legacy_fixtures.sh` + `tests/heavy/fixtures/down-mutate-pre-v0.13.sql` + `tests/heavy/fixtures/down-mutate-pre-v0.18.sql` — schema-migration walk-forward matrix.
+- `tests/heavy/measure_rss.sh` + `tests/heavy/_measure_rss_workload.ts` + `tests/heavy/rss-baseline.json` — RSS budget gate, informational-only until Linux baseline lands.
+- `tests/heavy/read_latency_under_sync.sh` + `tests/heavy/_read_latency_workload.ts` — search p50/p95/p99 baseline vs under-load.
+- `tests/heavy/sync_lock_regression.sh` — concurrent `gbrain sync` lock contention.
+- `tests/heavy/README.md` + `scripts/run-heavy.sh` + `bun run test:heavy` script — convention + runner. Underscore-prefix files (`_foo.sh`) are helpers skipped by the runner.
+
+#### Fuzz harness (new)
+
+- `test/fuzz/pure-validators.test.ts` — purity-guarded: `escapeLikePattern`, `parseFactsFence`.
+- `test/fuzz/mixed-validators.test.ts` — same property tests, no purity guarantee: `validatePageSlug`, `validateFilename`, `splitBody`, `slugifyPath`, `sanitizeQueryForPrompt`.
+- `test/fuzz/filesystem-validators.test.ts` — fs-backed property tests with temp dirs: `validateUploadPath` (symlink-escape, traversal probe, arbitrary input).
+- `test/fuzz/regressions/README.md` — pin-failed-fuzz-inputs convention.
+- `scripts/check-fuzz-purity.sh` — bun-bundle + grep for banned imports. Wired into `bun run verify`.
+
+#### CI workflow (new)
+
+- `.github/workflows/heavy-tests.yml` — `cron: '17 8 * * *'` + `pull_request: types: [labeled]` with `heavy-tests` filter + `workflow_dispatch`. Postgres service + pinned action SHAs + artifact upload on failure (uploads `~/.gbrain/audit/heavy-*` + `tests/heavy/rss-baseline.json`).
+
+#### Tests + docs
+
+- `test/regressions/v0_36_frontier_cap.test.ts` — 4 pinned contracts: cap-unset back-compat, cap-hit bounds result to `<= cap+1` (the actually-useful protection invariant), MCP wire-shape preservation (still Array), concurrency independence (two concurrent calls on same engine with different caps — larger cap sees >= as many nodes).
+- `CLAUDE.md` — file taxonomy gains `tests/heavy/*.sh` + `test/fuzz/*.test.ts` entries; `traverseGraph` entry notes the new opt + the stripped truncation callback.
+- `llms-full.txt` regenerated.
+
 ## [0.37.1.0] - 2026-05-19
 
 **Your brain can now collide its own ideas.**
