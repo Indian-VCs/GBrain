@@ -2,6 +2,41 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.37.7.0] - 2026-05-21
+
+**Your federated brain stops silently writing to the wrong source. Your autopilot stops thrashing when you point it at a second brain. A handful of CLI surfaces that crashed on first call stop crashing.**
+
+If you've ever run gbrain with more than one source (an Obsidian vault + a docs repo, a CEO with multiple team sub-brains), you've probably noticed that `gbrain import --source dept-x` silently writes to `default` instead. Or that `gbrain extract` produces zero links on a federated brain. Or that `gbrain doctor` recommends a command that can't actually fix it. This release wires every CLI surface through the same source-resolver that `gbrain serve` has used since v0.18.0, and adds a doctor check that catches the silent-collapse-to-default class.
+
+Plus: autopilot lockfile finally respects `GBRAIN_HOME` so two brains can coexist. The reconnect loop that logged `config.database_url undefined` forever now exits cleanly and lets launchd back off. `gbrain reindex-frontmatter` no longer crashes before doing anything. OAuth `authorization_code` confidential clients work again. And we caught a dead-letter bug where successful subagent jobs were being marked failed because the worker tried to re-prompt past an `end_turn`.
+
+### What landed
+
+(stub — populated by /ship)
+
+## To take advantage of v0.37.7.0
+
+`gbrain upgrade` should do this automatically. If it didn't, or if
+`gbrain doctor` warns about anything new:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Verify the source-routing fix on your federated brains:**
+   ```bash
+   gbrain sources current
+   gbrain doctor --json | jq '.checks[] | select(.name=="source_routing_health")'
+   ```
+3. **If autopilot was thrashing on a second-brain install,** check
+   the new lockfile path:
+   ```bash
+   ls -la ~/.gbrain/autopilot.lock $GBRAIN_HOME/autopilot.lock 2>/dev/null
+   ```
+4. **If any step fails,** file an issue at
+   https://github.com/garrytan/gbrain/issues with `gbrain doctor`
+   output + contents of `~/.gbrain/upgrade-errors.jsonl` if it exists.
+
 ## [0.37.4.0] - 2026-05-20
 
 **A nightly safety net for the bug class that bit gbrain 10 times in 2 years.**
