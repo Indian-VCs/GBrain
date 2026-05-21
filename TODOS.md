@@ -1,6 +1,86 @@
 # TODOS
 
 
+## v0.37.8.0 pre-existing master test regression (noticed during ship)
+
+- [ ] **P0: `test/doctor-report-remote.test.ts:65` — `full report on healthy brain` fails with `health_score: 50` (expects `>=70`).** Reproduces in isolation on fresh PGLite. Introduced by master's v0.37.3.0 (#1215, `skill_brain_first` doctor check) which appears to return non-ok on freshly-initialized test brains, dropping the composite health score below the test's threshold. Fix shape: either (a) `skill_brain_first` should return `ok` (or `n/a`) on empty/test brains with no user-authored skills, OR (b) `doctor-report-remote.test.ts:68` should seed the skills directory before computing the score, OR (c) downgrade `skill_brain_first` non-ok to a check that doesn't penalize the score on fresh brains. Owner: maintainer of #1215. Noticed during /ship of garrytan/kolkata-v3 → v0.37.8.0.
+
+## v0.37.7.0 federated-brains + autopilot safety follow-ups (v0.37.x+)
+
+- [ ] **.sql file indexing (#1173) — dropped from v0.37.7.0 because tree-sitter-sql.wasm is not in `src/assets/wasm/grammars/`.** The grammars directory ships 35 languages but SQL is not among them. Plan deliberately verify-first-gated this (codex CF11). Re-file as a dedicated wave that: (a) ships tree-sitter-sql.wasm (vendor from upstream), (b) extends the sync walker's `.md|.markdown|.txt` extension filter to include `.sql`, (c) routes `.sql` through `importCodeFile()` with `page_kind='code'`, (d) addresses the slug-shape collision codex flagged with #1172's punted "flatten extensions" work — `slugifyCodePath('docs/auth.sql')` produces a slug shape that may collide with `docs/auth.md` if #1172 ever ships. Verify-first the slug round-trip before merging.
+
+- [ ] **#1204 deeper investigation — `gbrain extract all` reports 0 links on federated brains with cross-source duplicate slugs.** v0.37.7.0 added `--source-id <id>` to scope extraction explicitly, which gives users a workaround. But the underlying "silent 0 links" bug on unscoped federated extracts has additional facets: the resolver path in `extractLinksFromDB` builds `slugToSources` from `listAllPageRefs`, then iterates `allRefs` and resolves wikilinks. For a slug that exists in 2+ sources, the resolver may pick the wrong target. Run `/investigate` against a fixture with 2 sources × overlapping slugs × cross-source wikilinks, characterize the failure mode, file a precise fix.
+
+- [ ] **Tier 5N doctor check — `subagent_terminal_dead_letters`.** v0.37.7.0 shipped T9 (the subagent dead-letter fix) but deferred the doctor sweep that surfaces historical dead-lettered jobs whose final message is a text-only assistant turn (the #1151 fingerprint). The fix prevents new occurrences; the doctor check would help users discover existing dead-letters from before the upgrade so they can `gbrain jobs prune --status dead --queue default` cleanly. Add the check in v0.37.8+ once a clean conflict-resolved doctor.ts is available.
+
+## v0.37.6.0 OpenRouter recipe follow-ups (v0.37.x+ / v0.38.x)
+
+- [ ] **v0.37.x: Verify `tool_use_id` stability through OpenRouter with a live test, then decide whether to relax `isAnthropicProvider()`'s subagent-only gate.** v0.37.6.0 ships `supports_subagent_loop: false` on the OR recipe as informational only — the real gate is `isAnthropicProvider()` in `src/core/model-config.ts`, which hard-rejects every non-Anthropic provider at subagent submit time. OR proxies Anthropic-direct models that DO support stable `tool_use_id` by contract, but OR's response normalization may strip or re-encode them. A short live test: spin up a real OR account, run a subagent loop via `openrouter:anthropic/claude-haiku-4.5`, deliberately abort mid-loop, retry. Assert tool_use_id blocks are byte-identical across attempts. If they are, the `isAnthropicProvider()` check could relax to allow Anthropic models proxied through OR, giving users OR's price/availability story for subagent work. This is a deeper structural change than a recipe-flag flip; needs its own /plan-eng-review pass. Filed during v0.37.6.0 codex review.
+
+- [ ] **v0.37.x: Quarterly OR catalog refresh.** v0.37.6.0 ships 8 curated chat slugs (gpt-5.2, gpt-5.2-chat, gpt-5.5, claude-haiku-4.5, claude-sonnet-4.6, claude-opus-4.7, gemini-3-flash-preview, deepseek-chat) with `price_last_verified: '2026-05-20'`. OR's catalog churns weekly; specific slugs get deprecated, renamed, or merged. Refresh cadence: every 90 days, walk https://openrouter.ai/models, prune deprecated slugs, add new frontier IDs that match the recipe's curation logic (frontier-tier + cheap-routing entry points). Bump `price_last_verified`. The shape-test regression in `test/ai/recipe-openrouter.test.ts` (`MODEL_SHAPE` regex) means typos surface immediately; the catalog refresh is about discovery, not validation.
+
+- [ ] **v0.37.x: Adopt `resolveDefaultHeaders` for Together / Groq / other attribution-bearing recipes.** v0.37.6.0's `default_headers` / `resolveDefaultHeaders` seam is generic — any recipe whose provider benefits from app-attribution headers can opt in. Together and Groq both have rankings/analytics tied to per-app headers. Add their respective attribution headers to each recipe, similar to OR's `HTTP-Referer` + `X-OpenRouter-Title`. No type-system or gateway changes needed; just `default_headers` blocks on the existing recipes plus `<PROVIDER>_REFERER` / `<PROVIDER>_TITLE` env vars in their `auth_env.optional`. Filed during v0.37.6.0 eng review as a D4 generalization opportunity.
+
+- [ ] **v0.37.x: Guard cli.ts `main()` so importing `buildGatewayConfig` doesn't print help.** v0.37.6.0 exported `buildGatewayConfig` from `src/cli.ts` for test access. Importing it triggers the file's top-level `main()` which prints help to stdout during tests — functionally harmless (tests pass) but noisy. Fix: wrap `main()` in `if (import.meta.main)` so it only runs when cli.ts is the entry point, not when imported. Touches one line; trivial. Filed during v0.37.6.0 implementation.
+
+
+## v0.37.4.0 pgGraph CI scaffolding follow-ups (v0.37.x+)
+
+- [ ] **T8 truncation signal — defer until dedupe-then-cap SQL + Postgres parity E2E.** v0.37.4.0 ships `frontierCap` as the actually-useful protection but strips the `onTruncation` callback after /review adversarial pass (Claude + Codex both flagged). Two bugs in the v1 algorithm: (a) FALSE POSITIVE — `count == cap` at a depth fires the callback even when the graph organically has exactly cap unique nodes at that depth with no truncation; (b) FALSE NEGATIVE — recursive `LIMIT N` runs BEFORE outer `SELECT DISTINCT`, so diamond graphs (one parent fans out to N+5 candidates with duplicates) can have the LIMIT eat its slots on dupes, then DISTINCT collapses to <cap unique nodes, missing real truncation. Fix shape: rewrite both engine impls to dedupe candidates (by `(slug, id)` or page id, source-scoped) BEFORE applying the LIMIT — i.e., `(SELECT DISTINCT ON ... ORDER BY slug, id LIMIT N)` inside the recursive term instead of post-CTE DISTINCT. Then write the missing `test/e2e/engine-parity-frontier-cap.test.ts` (Postgres against PGLite, identical chosen slugs when cap fires + stable ordering). Restore `TruncationInfo` + `opts.onTruncation` to `TraverseGraphOpts` with the cap-after-dedupe shape. Callers that need truncation visibility in the interim can compare `result.length` against expected fanout bounds. /review found it; not a blocker for v0.37.4.0 because the cap itself works correctly and is back-compat (default unset = no behavior change).
+
+- [ ] **pg_upgrade_matrix.sh: add layer-isolation mode.** The current script tests whole-system walk-forward (the bug class CHANGELOG advertises). Adversarial /review caught that multi-layer healing (bootstrap → SCHEMA_SQL → migrations → verifySchema) means stubbing out `applyForwardReferenceBootstrap` entirely still produces clean walk-forwards on both fixtures. So the matrix doesn't actually gate on bootstrap correctness — only on whole-system wedges. Add an `ISOLATE_BOOTSTRAP=1` mode that monkey-patches the downstream layers (or runs a smaller engine surface that only invokes bootstrap) so single-probe regressions can be isolated. Complements the existing `test/schema-bootstrap-coverage.test.ts` static guard.
+
+- [ ] **scripts/check-fuzz-purity.sh: derive TARGET_FILES from `test/fuzz/pure-validators.test.ts` imports.** Today the targets are hand-maintained in two places (`TARGET_FILES` array + the test file's imports). Adding a new pure fuzz target requires updating both; forgetting the script means the new target ships ungated. Parse the test file's imports at script start (regex over `import { ... } from '../../src/.../*.ts'`) instead.
+## skill_brain_first wave follow-ups (v0.36.4+)
+
+- [ ] **v0.37+: Runtime brain-first gate at MCP dispatch.** The v0.36.x
+  `skill_brain_first` doctor check is purely static — it scans SKILL.md
+  authorship for canonical Convention callouts, `brain_first: exempt`
+  frontmatter, or position-relative brain references. The motivating
+  incident (2026-05-19 tweet-shield) was a RUNTIME failure: an agent
+  called Perplexity / cross-modal eval to assess Garry's Palantir tweet
+  without ever checking the brain, which already had "designed the
+  entire Finance product UI" and "150+ PSDs from April-December 2006."
+  A runtime gate would hook MCP tool dispatch: when a subagent invokes
+  `web_search` / `perplexity` / `exa` / etc., require that a `search`,
+  `query`, or `get_page` call landed earlier in the same agent turn.
+  Subagent-isolation aware (the gate scope is per-turn, per-agent).
+  Touches: `src/mcp/dispatch.ts` (tool-call entry seam, would gate before
+  routing to external-tool handlers), `src/core/minions/handlers/subagent.ts`
+  (per-turn tracking), `src/core/operations.ts` (cross-reference the
+  brain-tool ops). Full wave on its own (~3-5 days human / ~1-2h CC).
+  Out of scope for the static-check wave because the surface area is
+  fundamentally different. Closes the tweet-shield root cause at the
+  enforcement layer instead of just the authorship layer.
+
+- [ ] **v0.36.x: Audit trend doctor check `skill_brain_first_trend`.** The
+  v0.36.x snapshot+diff audit JSONL at
+  `~/.gbrain/audit/skill-brain-first-YYYY-Www.jsonl` records detected /
+  resolved / fixed events as transitions. The data is reachable via
+  `readRecentBrainFirstEvents(7)` in `src/core/audit-skill-brain-first.ts`
+  but no doctor surface consumes it yet. Add a `skill_brain_first_trend`
+  check (~30 LOC) that reads recent events, aggregates added vs resolved
+  counts per week, warns when violations are rising (e.g. >3 added, 0
+  resolved over 4 weeks). Cheap to land once audit logs accumulate
+  multiple weeks of data (no point shipping it with zero baseline data).
+  Mirrors the doctor check pattern in `src/commands/doctor.ts`. Filed
+  during /plan-eng-review as TODO-2.
+
+- [ ] **v0.36.x: Tighten the external-lookup regex to reduce false-positive
+  rate from name mentions.** v0.36.x ships with word-boundary regex on
+  `perplexity`, `exa`, `web_search`, etc. This matches "perplexity"
+  inside `perplexity-research` (a sub-skill name in dispatcher prose, not
+  an API call). Two skills in this repo's own `skills/` (functional-area-
+  resolver, strategic-reading) hit this false-positive and ship with
+  `brain_first: exempt`. Possible mitigation: tighten the pattern to
+  require an API-call shape like `perplexity\.|perplexity[\s._-]?(?:api|search|query)`.
+  Whack-a-mole risk — the negation-prose false-positive class can't be
+  reliably caught with regex either. Tracking as a follow-up; the
+  declarative `brain_first: exempt` opt-out is the canonical answer for
+  the false-positive cases. Decide based on real-world hit rate after
+  the v0.36.x wave is in production for a few weeks.
+
+
 ## v0.35.6.0 floor-ratio gate follow-ups (v0.36.x+)
 
 - [ ] **v0.36.x: Run gbrain-side floor-ratio ablation before flipping any mode-bundle default.** v0.35.6.0 ships the gate default-off (`MODE_BUNDLES[*].floor_ratio = undefined`) because the SkyTwin labeled-retrieval ablation that surfaced the regression isn't reproducible on gbrain's own eval surfaces from outside. Before any mode-bundle default flip, run the gate at `floor_ratio: undefined`, 0.85, 0.90, 0.95 across `gbrain eval longmemeval`, `gbrain eval whoknows`, `gbrain eval suspected-contradictions`, and the BrainBench-Real replay (sibling gbrain-evals repo). Quantify per-mode P@k / R@k / nDCG@k / top-1 stability deltas. Look for: regression on queries that genuinely need the long-tail boost (specific entity lookups, low-frequency topics) vs improvement on queries where weak-overlap pages were leapfrogging. The corpus-level finding determines whether tokenmax (most exposure to the failure mode) should flip first, or whether the gate stays a per-call opt-in indefinitely. Filed during v0.35.6.0 codex outside-voice review.

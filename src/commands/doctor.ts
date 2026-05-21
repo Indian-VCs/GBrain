@@ -4,6 +4,19 @@ import { LATEST_VERSION, getIdleBlockers } from '../core/migrate.ts';
 import { checkResolvable } from '../core/check-resolvable.ts';
 import { autoFixDryViolations, type AutoFixReport, type FixOutcome } from '../core/dry-fix.ts';
 import { autoDetectSkillsDirReadOnly } from '../core/repo-root.ts';
+import { loadOrDeriveManifest } from '../core/skill-manifest.ts';
+import { parseSkillFrontmatter } from '../core/skill-frontmatter.ts';
+import {
+  analyzeSkillBrainFirst,
+  buildBrainFirstSummaryLine,
+  type BrainFirstAnalysis,
+} from '../core/skill-brain-first.ts';
+import {
+  loadSnapshot,
+  writeSnapshotAtomically,
+  diffAgainstSnapshot,
+  appendAuditEventsForTransitions,
+} from '../core/audit-skill-brain-first.ts';
 import { loadCompletedMigrations } from '../core/preferences.ts';
 import { compareVersions } from './migrations/index.ts';
 import { createProgress, startHeartbeat, type ProgressReporter } from '../core/progress.ts';
@@ -1088,6 +1101,151 @@ export async function checkEmbeddingWidthConsistency(engine: BrainEngine): Promi
  * the mode (e.g. mode=conservative but cache.enabled=false), say so in
  * the message and paste a `gbrain search modes --reset` fix command.
  */
+
+/**
+ * v0.37.7.0 — Tier 5K source_routing_health (D5 lock: 200-page total cap).
+ *
+ * On a multi-source brain, sample up to 200 recent pages across all
+ * non-default sources (per-source cap = min(50, ceil(200/N))). Warn
+ * when:
+ *  - A non-default source has zero pages (silent-collapse-to-default
+ *    fingerprint from #1167 + #1222).
+ *  - The brain repo has a `.gitignore` file but
+ *    `sync.respect_gitignore` is unset/false (info-line nudge for
+ *    Tier 4I's opt-in flag).
+ *
+ * Cost-bounded: total cap of 200 means a 20-source CEO brain pays
+ * 20*10 = 200 selects rather than 20*50 = 1000.
+ */
+export async function checkSourceRoutingHealth(engine: BrainEngine): Promise<Check> {
+  try {
+    const sources = await engine.executeRaw<{ id: string }>(
+      `SELECT id FROM sources WHERE id <> 'default'`,
+    );
+    if (sources.length === 0) {
+      return { name: 'source_routing_health', status: 'ok', message: 'Single-source brain (no federation to check)' };
+    }
+    const perSourceCap = Math.min(50, Math.ceil(200 / Math.max(1, sources.length)));
+    const emptySources: string[] = [];
+    for (const s of sources) {
+      const rows = await engine.executeRaw<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM pages WHERE source_id = $1 LIMIT $2`,
+        [s.id, perSourceCap],
+      );
+      if (Number(rows[0]?.n ?? 0) === 0) {
+        emptySources.push(s.id);
+      }
+    }
+    if (emptySources.length > 0) {
+      return {
+        name: 'source_routing_health',
+        status: 'warn',
+        message:
+          `${emptySources.length} non-default source(s) have zero pages: ${emptySources.join(', ')}. ` +
+          `If you've recently run \`gbrain import --source-id <id>\` against these, the writes may have ` +
+          `silently fallen to the default source pre-v0.37.7.0. Re-run with --source-id; verify via ` +
+          `\`gbrain sources current --json\`.`,
+      };
+    }
+    return {
+      name: 'source_routing_health',
+      status: 'ok',
+      message: `Multi-source brain (${sources.length} non-default source(s)); all populated`,
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { name: 'source_routing_health', status: 'warn', message: `Check failed: ${msg}` };
+  }
+}
+
+/**
+ * v0.37.7.0 — Tier 5L oauth_confidential_client_health.
+ *
+ * Confidential OAuth clients (token_endpoint_auth_method != 'none')
+ * MUST have a non-NULL client_secret_hash. v0.34.1.0's #909 fix
+ * intentionally NULLs the column for public PKCE clients; if any
+ * row claims confidential auth but has NULL hash, that's the
+ * regression fingerprint from #1166.
+ */
+export async function checkOauthConfidentialHealth(engine: BrainEngine): Promise<Check> {
+  try {
+    const rows = await engine.executeRaw<{ client_id: string; method: string | null; hash: string | null }>(
+      `SELECT client_id,
+              token_endpoint_auth_method AS method,
+              client_secret_hash AS hash
+         FROM oauth_clients`,
+    );
+    if (rows.length === 0) {
+      return { name: 'oauth_confidential_client_health', status: 'ok', message: 'No OAuth clients registered' };
+    }
+    const broken = rows.filter(r => {
+      const isPublic = r.method === 'none';
+      return !isPublic && (r.hash == null || r.hash === '');
+    });
+    if (broken.length > 0) {
+      return {
+        name: 'oauth_confidential_client_health',
+        status: 'fail',
+        message:
+          `${broken.length} confidential OAuth client(s) have NULL/empty secret hash: ${broken.map(b => b.client_id).slice(0, 5).join(', ')}` +
+          (broken.length > 5 ? ` (+${broken.length - 5} more)` : '') +
+          `. Fix: \`gbrain auth revoke-client <id> && gbrain auth register-client …\` for each, OR \`gbrain upgrade\` if pre-v0.37.7.0.`,
+      };
+    }
+    return {
+      name: 'oauth_confidential_client_health',
+      status: 'ok',
+      message: `${rows.length} OAuth client(s) registered; all auth shapes consistent`,
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // Pre-OAuth schema (oauth_clients table missing) → ok.
+    if (msg.toLowerCase().includes('relation') && msg.toLowerCase().includes('does not exist')) {
+      return { name: 'oauth_confidential_client_health', status: 'ok', message: 'OAuth not configured (skipping)' };
+    }
+    return { name: 'oauth_confidential_client_health', status: 'warn', message: `Check failed: ${msg}` };
+  }
+}
+
+/**
+ * v0.37.7.0 — Tier 5M autopilot_lock_scope (PID-safe hint per codex CF11).
+ *
+ * Detects stale autopilot lockfiles. When `GBRAIN_HOME` is set, the
+ * canonical lock path lives under `gbrainPath('autopilot.lock')`.
+ * If a hardcoded `~/.gbrain/autopilot.lock` ALSO exists outside the
+ * current `GBRAIN_HOME`, that's a pre-v0.37.7.0 leftover or a
+ * different brain's lock. Hint includes PID + a `ps -p` check so
+ * the user verifies before deleting.
+ */
+export function checkAutopilotLockScope(): Check {
+  try {
+    const canonical = gbrainPath('autopilot.lock');
+    const home = process.env.HOME || '';
+    const legacy = home ? `${home}/.gbrain/autopilot.lock` : '';
+    // Same path → nothing to surface.
+    if (canonical === legacy || !legacy || !existsSync(legacy)) {
+      return { name: 'autopilot_lock_scope', status: 'ok', message: `Lock path: ${canonical}` };
+    }
+    // legacy lock exists outside GBRAIN_HOME. Read its PID for a safe hint.
+    let owningPid: string = 'unknown';
+    try {
+      const raw = readFileSync(legacy, 'utf8').trim();
+      if (/^\d+$/.test(raw)) owningPid = raw;
+    } catch { /* unreadable → leave 'unknown' */ }
+    return {
+      name: 'autopilot_lock_scope',
+      status: 'warn',
+      message:
+        `Stale lockfile outside GBRAIN_HOME: ${legacy} (owning PID: ${owningPid}). ` +
+        `Verify with \`ps -p ${owningPid}\` — if the process is dead, \`rm ${legacy}\`. ` +
+        `If alive, identify it (\`ps -fp ${owningPid}\`) and stop before deleting.`,
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { name: 'autopilot_lock_scope', status: 'warn', message: `Check failed: ${msg}` };
+  }
+}
+
 export async function checkSearchMode(engine: BrainEngine): Promise<Check> {
   try {
     const mode = await engine.getConfig('search.mode');
@@ -1464,6 +1622,21 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
   if (skillsDir) {
     const conformanceResult = checkSkillConformance(skillsDir);
     checks.push(conformanceResult);
+  }
+
+  // 2b. Skill brain-first compliance (v0.36.x, supersedes PR #1206).
+  // Scans every SKILL.md for external-lookup tools (web_search, exa,
+  // perplexity, etc.) and warns when the skill doesn't declare
+  // `brain_first: exempt` AND doesn't carry a canonical Convention
+  // callout / Phase 1 brain heading / position-relative brain-first
+  // reference. Motivated by the 2026-05-19 tweet-shield incident.
+  //
+  // Audit trail: snapshot+diff at ~/.gbrain/audit/skill-brain-first-
+  // snapshot.json. Writes one detected/resolved JSONL line per state
+  // transition + one fixed line per applied --fix. Stable brain → zero
+  // audit writes per doctor run.
+  if (skillsDir) {
+    checks.push(skillBrainFirstCheck(skillsDir));
   }
 
   // 3. Half-migrated Minions detection (filesystem-only).
@@ -3512,6 +3685,18 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
     checks.push(await checkZeEmbeddingHealth(engine));
     progress.heartbeat('embedding_width_consistency');
     checks.push(await checkEmbeddingWidthConsistency(engine));
+
+    // v0.37.7.0 doctor checks (#1167, #1166, #1226) — fast-mode skipped
+    // since these touch DB queries with cost on large brains.
+    // 5K — source_routing_health (D5 lock: 200-page total cap)
+    progress.heartbeat('source_routing_health');
+    checks.push(await checkSourceRoutingHealth(engine));
+    // 5L — oauth_confidential_client_health (success-path probe per codex CF8)
+    progress.heartbeat('oauth_confidential_client_health');
+    checks.push(await checkOauthConfidentialHealth(engine));
+    // 5M — autopilot_lock_scope (PID-safe hint per codex CF11)
+    progress.heartbeat('autopilot_lock_scope');
+    checks.push(checkAutopilotLockScope());
   }
 
   progress.finish();
@@ -3604,6 +3789,149 @@ function checkSkillConformance(skillsDir: string): Check {
   } catch {
     return { name: 'skill_conformance', status: 'warn', message: 'Could not parse manifest.json' };
   }
+}
+
+/**
+ * v0.36.x skill_brain_first doctor check (supersedes PR #1206).
+ *
+ * Walks the skills manifest, runs the pure `analyzeSkillBrainFirst()`
+ * helper on each, surfaces violators with structured issues[]. Snapshot-
+ * diff against the previous run drives audit JSONL writes (transition-
+ * only) — stable brains produce zero audit churn per doctor invocation.
+ *
+ * Exit shape:
+ *   - 0 violators → status: 'ok', message: '<n> skills compliant or exempt'
+ *   - any violator → status: 'warn', message + per-skill summary lines +
+ *     formerly-EXEMPT_SKILLS hint when applicable (CMT1 replaces the
+ *     dropped upgrade migration with a guided opt-in)
+ *
+ * Test seam: pure function, no `process.exit`. Direct call from tests
+ * with a synthetic skills dir under tempdir.
+ */
+export function skillBrainFirstCheck(skillsDir: string): Check {
+  let manifest: ReturnType<typeof loadOrDeriveManifest>;
+  try {
+    manifest = loadOrDeriveManifest(skillsDir);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      name: 'skill_brain_first',
+      status: 'warn',
+      message: `Could not load skills manifest from ${skillsDir} (${msg})`,
+    };
+  }
+  if (manifest.skills.length === 0) {
+    return {
+      name: 'skill_brain_first',
+      status: 'ok',
+      message: 'No skills found — skill_brain_first not applicable',
+    };
+  }
+
+  const violators: BrainFirstAnalysis[] = [];
+  const typoSkills: BrainFirstAnalysis[] = [];
+
+  for (const entry of manifest.skills) {
+    const skillPath = join(skillsDir, entry.path);
+    if (!existsSync(skillPath)) continue; // resolver_health already reports
+    let content: string;
+    try {
+      content = readFileSync(skillPath, 'utf-8');
+    } catch {
+      continue; // best-effort; permissions etc.
+    }
+    const fm = parseSkillFrontmatter(content);
+    const result = analyzeSkillBrainFirst(content, entry.name, fm);
+    if (result.typo_hint) typoSkills.push(result);
+    if (result.status === 'warn') violators.push(result);
+  }
+
+  // --- Snapshot + diff audit (A2 contract) ---------------------------------
+  // Best-effort: snapshot/audit failures don't poison the check result.
+  const violatorSlugs = new Set(violators.map(v => v.skill));
+  const patternsBySlug = new Map<string, string[]>();
+  for (const v of violators) {
+    patternsBySlug.set(v.skill, v.external_patterns_matched);
+  }
+  let priorSnapshotPresent = true;
+  try {
+    const snapshot = loadSnapshot();
+    priorSnapshotPresent = snapshot.present;
+    const diff = diffAgainstSnapshot(violatorSlugs, snapshot.violators);
+    const doctorRunId = `${process.pid}-${Date.now()}`;
+    if (snapshot.present) {
+      // Steady-state path: write events only for transitions.
+      appendAuditEventsForTransitions(diff, patternsBySlug, doctorRunId);
+    } else {
+      // First run / corrupt snapshot: bootstrap by writing one
+      // `detected` line per current violator. This is the only path
+      // that writes more than `diff.added.length` lines in a single
+      // doctor invocation.
+      const bootstrapDiff = { added: Array.from(violatorSlugs).sort(), removed: [], unchanged: [] };
+      appendAuditEventsForTransitions(bootstrapDiff, patternsBySlug, doctorRunId);
+    }
+    writeSnapshotAtomically(violatorSlugs);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[gbrain] skill_brain_first audit step failed (${msg}); check continues\n`);
+  }
+
+  // --- Build the check result ---------------------------------------------
+  if (violators.length === 0) {
+    const typoNote = typoSkills.length > 0
+      ? ` (note: ${typoSkills.length} skill(s) have brain_first typo hints: ${typoSkills.map(t => t.skill).join(', ')})`
+      : '';
+    return {
+      name: 'skill_brain_first',
+      status: 'ok',
+      message: `${manifest.skills.length} skill(s) compliant or exempt${typoNote}`,
+    };
+  }
+
+  // Sort for deterministic message + issues order.
+  violators.sort((a, b) => a.skill.localeCompare(b.skill));
+
+  const formerlyExempt = violators.filter(v => v.formerly_hardcoded_exempt);
+  const summary: string[] = [];
+  summary.push(
+    `${violators.length} skill(s) do external lookups without a brain-first compliance signal. ` +
+    `Fix via 'gbrain doctor --fix' (adds canonical Convention callout) ` +
+    `or set 'brain_first: exempt' in skill frontmatter for genuine infra skills.`,
+  );
+  if (formerlyExempt.length > 0) {
+    summary.push(
+      `Of these, ${formerlyExempt.length} were hardcoded-exempt in PR #1206 (${formerlyExempt.map(v => v.skill).slice(0, 6).join(', ')}${formerlyExempt.length > 6 ? ', ...' : ''}). ` +
+      `These need explicit opt-out now: run 'gbrain doctor --fix' to add the canonical callout, ` +
+      `or add 'brain_first: exempt' to frontmatter for skills that genuinely shouldn't consult the brain.`,
+    );
+  }
+  if (typoSkills.length > 0) {
+    summary.push(
+      `${typoSkills.length} skill(s) have brain_first typo hints: ` +
+      typoSkills.slice(0, 6).map(t => `${t.skill} — ${t.typo_hint}`).join('; ') +
+      (typoSkills.length > 6 ? '; ...' : ''),
+    );
+  }
+
+  return {
+    name: 'skill_brain_first',
+    status: 'warn',
+    message: summary.join(' '),
+    issues: violators.map(v => ({
+      type: 'skill_missing_brain_first',
+      skill: v.skill,
+      action: v.formerly_hardcoded_exempt
+        ? `Add canonical Convention callout OR set 'brain_first: exempt' (was hardcoded-exempt in PR #1206)`
+        : `Add canonical Convention callout OR set 'brain_first: exempt'`,
+      fix: {
+        kind: 'add-convention-callout',
+        external_patterns: v.external_patterns_matched,
+        typo_hint: v.typo_hint,
+        formerly_hardcoded_exempt: v.formerly_hardcoded_exempt,
+        summary_line: buildBrainFirstSummaryLine(v),
+      },
+    })),
+  };
 }
 
 function outputResults(checks: Check[], json: boolean): boolean {

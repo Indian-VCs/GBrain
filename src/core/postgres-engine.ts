@@ -681,10 +681,10 @@ export class PostgresEngine implements BrainEngine {
     }
 
     if (needsPagesProvenance) {
-      // v80 (pages_provenance_columns): four nullable columns added by the
+      // v81 (pages_provenance_columns): four nullable columns added by the
       // v0.38 ingestion cathedral. No SCHEMA_SQL index/FK references them
       // today; bootstrap exists defense-in-depth so future schema work that
-      // does reference them doesn't wedge pre-v80 brains.
+      // does reference them doesn't wedge pre-v81 brains.
       await conn.unsafe(`
         ALTER TABLE pages ADD COLUMN IF NOT EXISTS ingested_via TEXT;
         ALTER TABLE pages ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ;
@@ -2028,7 +2028,7 @@ export class PostgresEngine implements BrainEngine {
   async traverseGraph(
     slug: string,
     depth: number = 5,
-    opts?: { sourceId?: string; sourceIds?: string[] },
+    opts?: import('./engine.ts').TraverseGraphOpts,
   ): Promise<GraphNode[]> {
     const sql = this.sql;
     // v0.34.1 (#861 — P0 leak seal): scope visited nodes to the caller's
@@ -2054,6 +2054,31 @@ export class PostgresEngine implements BrainEngine {
       : opts?.sourceId
         ? sql`AND p3.source_id = ${opts.sourceId}`
         : sql``;
+    // T8 (v0.36+): frontier cap. When set, the recursive term applies a
+    // parenthesized LIMIT N with ORDER BY (slug, id) for stable selection.
+    // Postgres' parenthesized-LIMIT inside a recursive term caps per
+    // ITERATION, which maps approximately to per-BFS-LAYER (the mapping is
+    // exact when fanout is bounded; for hub-fanout graphs the cap fires
+    // early). Post-query, count rows per depth — if any depth == cap, fire
+    // the truncation callback.
+    const cap = opts?.frontierCap;
+    const recursiveStep = cap !== undefined && cap > 0
+      ? sql`(SELECT p2.id, p2.slug, p2.title, p2.type, g.depth + 1, g.visited || p2.id
+             FROM graph g
+             JOIN links l ON l.from_page_id = g.id
+             JOIN pages p2 ON p2.id = l.to_page_id
+             WHERE g.depth < ${depth}
+               AND NOT (p2.id = ANY(g.visited))
+               ${stepScope}
+             ORDER BY p2.slug ASC, p2.id ASC
+             LIMIT ${cap})`
+      : sql`SELECT p2.id, p2.slug, p2.title, p2.type, g.depth + 1, g.visited || p2.id
+            FROM graph g
+            JOIN links l ON l.from_page_id = g.id
+            JOIN pages p2 ON p2.id = l.to_page_id
+            WHERE g.depth < ${depth}
+              AND NOT (p2.id = ANY(g.visited))
+              ${stepScope}`;
     // Cycle prevention: visited array tracks page IDs already in the path.
     const rows = await sql`
       WITH RECURSIVE graph AS (
@@ -2062,13 +2087,7 @@ export class PostgresEngine implements BrainEngine {
 
         UNION ALL
 
-        SELECT p2.id, p2.slug, p2.title, p2.type, g.depth + 1, g.visited || p2.id
-        FROM graph g
-        JOIN links l ON l.from_page_id = g.id
-        JOIN pages p2 ON p2.id = l.to_page_id
-        WHERE g.depth < ${depth}
-          AND NOT (p2.id = ANY(g.visited))
-          ${stepScope}
+        ${recursiveStep}
       )
       SELECT DISTINCT g.slug, g.title, g.type, g.depth,
         coalesce(
@@ -2088,6 +2107,12 @@ export class PostgresEngine implements BrainEngine {
       FROM graph g
       ORDER BY g.depth, g.slug
     `;
+
+    // T8 truncation-detection callback was designed here but the v1 algorithm
+    // had both false-positive (organic count == cap) and false-negative
+    // (LIMIT-before-DISTINCT in diamond graphs) cases caught by adversarial
+    // review. Stripped pending the dedupe-then-cap SQL rewrite + real Postgres
+    // parity coverage. See TODOS.md → "T8 truncation signal".
 
     return rows.map((r: Record<string, unknown>) => ({
       slug: r.slug as string,
@@ -3465,22 +3490,27 @@ export class PostgresEngine implements BrainEngine {
       : sql``;
     const sinceClause = opts.since ? sql`AND since_date >= ${opts.since}` : sql``;
     const untilClause = opts.until ? sql`AND since_date <= ${opts.until}` : sql``;
+    // v0.36.1.1 T1c: `resolved` deliberately filters to the 3-state subset
+    // (correct|incorrect|partial) — NOT `resolved_quality IS NOT NULL` — so
+    // historical comparisons against pre-v74 scorecards stay valid.
+    // `unresolvable_count` is a sibling field counting the new 4th state.
     const rows = await sql`
       SELECT
-        COUNT(*) FILTER (WHERE kind = 'bet')::int                              AS total_bets,
-        COUNT(*) FILTER (WHERE resolved_quality IS NOT NULL)::int              AS resolved,
-        COUNT(*) FILTER (WHERE resolved_quality = 'correct')::int              AS correct,
-        COUNT(*) FILTER (WHERE resolved_quality = 'incorrect')::int            AS incorrect,
-        COUNT(*) FILTER (WHERE resolved_quality = 'partial')::int              AS partial,
+        COUNT(*) FILTER (WHERE kind = 'bet')::int                                              AS total_bets,
+        COUNT(*) FILTER (WHERE resolved_quality IN ('correct','incorrect','partial'))::int     AS resolved,
+        COUNT(*) FILTER (WHERE resolved_quality = 'correct')::int                              AS correct,
+        COUNT(*) FILTER (WHERE resolved_quality = 'incorrect')::int                            AS incorrect,
+        COUNT(*) FILTER (WHERE resolved_quality = 'partial')::int                              AS partial,
+        COUNT(*) FILTER (WHERE resolved_quality = 'unresolvable')::int                         AS unresolvable_count,
         AVG(
           CASE WHEN resolved_quality IN ('correct','incorrect')
                THEN POWER(weight - (CASE resolved_quality WHEN 'correct' THEN 1 ELSE 0 END), 2)
           END
-        )::float                                                               AS brier
+        )::float                                                                               AS brier
       FROM takes
       WHERE 1=1 ${holderClause} ${domainClause} ${sinceClause} ${untilClause} ${allowed}
     `;
-    const r = rows[0] as { total_bets: number; resolved: number; correct: number; incorrect: number; partial: number; brier: number | null };
+    const r = rows[0] as { total_bets: number; resolved: number; correct: number; incorrect: number; partial: number; unresolvable_count: number; brier: number | null };
     return finalizeScorecard(r);
   }
 
