@@ -3994,6 +3994,35 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 86,
+    name: 'page_links_view_alias',
+    // v0.39 — pglite-engine.ts and postgres-engine.ts both query a relation
+    // named `page_links` (LEFT JOIN page_links pl ON pl.to_page_id = p.id —
+    // see pglite-engine.ts:896 / postgres-engine.ts:959). The canonical
+    // table has always been `links`. This migration installs a `page_links`
+    // VIEW that aliases the table so brains initialized before the v0.39
+    // schema bundle pick up the alias on upgrade.
+    //
+    // Fresh installs already get the view via the embedded schema bundle.
+    // This migration is idempotent (CREATE OR REPLACE VIEW) so re-running
+    // is safe on either engine.
+    //
+    // Discovered during the brainstorm-cathedral wave (v0.39.0.0) when the
+    // E2E test had to workaround the missing view to exercise the resume
+    // path. Originally numbered v81; renumbered to v86 during merge with
+    // master's v0.38 cathedrals (provenance / subagent / spend / oauth
+    // binding) which claimed v81-v85.
+    //
+    // Narrow projection (id, from_page_id, to_page_id) so the view does not
+    // depend on columns added in later migrations (link_source,
+    // origin_page_id, resolution_type) — keeps ALTER TABLE DROP COLUMN
+    // and the bootstrap forward-reference probes unblocked on legacy brains.
+    sql: `
+      CREATE OR REPLACE VIEW page_links AS
+        SELECT id, from_page_id, to_page_id FROM links;
+    `,
+  },
+  {
+    version: 87,
     name: 'facts_event_type_column',
     // v0.40.2.0 — trajectory routing wave.
     //
@@ -4016,11 +4045,12 @@ export const MIGRATIONS: Migration[] = [
     // and PGLite; instant on tables of any size. No bootstrap probe
     // needed (no index, no FK references this column).
     //
-    // Renumbered v81→v82→v86 across two master merges:
+    // Renumbered v81→v82→v86→v87 across three master merges:
     //   v81 claimed by v0.38.0.0 (pages_provenance_columns).
     //   v82-v85 claimed by v0.38.1.0 (subagent_tool_executions_stable_id,
     //   mcp_spend_reservations, oauth_clients_budget_usd_per_day,
     //   oauth_clients_agent_binding).
+    //   v86 claimed by v0.39.0.0 (page_links_view_alias).
     idempotent: true,
     sql: `
       ALTER TABLE facts ADD COLUMN IF NOT EXISTS event_type TEXT;

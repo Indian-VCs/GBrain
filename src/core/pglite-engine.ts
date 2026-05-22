@@ -2715,7 +2715,7 @@ export class PGLiteEngine implements BrainEngine {
         const claimValue  = input.claim_value  ?? null;
         const claimUnit   = input.claim_unit   ?? null;
         const claimPeriod = input.claim_period ?? null;
-        // v0.40.2.0 — event_type column (Commit 1 migration v86).
+        // v0.40.2.0 — event_type column (Commit 1 migration v87).
         const eventType   = input.event_type   ?? null;
 
         // Param-positional dispatch: embedStr presence shifts the trailing

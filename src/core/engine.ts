@@ -441,7 +441,7 @@ export interface NewFact {
    * v0.40.2.0 — event-shaped row marker ('meeting', 'job_change',
    * 'location_change', etc). Mutually informational with `claim_metric`:
    * a row can have either, both, or neither. Persisted into
-   * `facts.event_type` (migration v86). Existing callers don't need to
+   * `facts.event_type` (migration v87). Existing callers don't need to
    * set this — leaving it undefined preserves pre-v0.40 behavior.
    */
   event_type?: string | null;

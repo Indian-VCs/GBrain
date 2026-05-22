@@ -1976,14 +1976,14 @@ describe('migrate v81 — round-trip on PGLite', () => {
   });
 });
 
-// ─── v0.40.2.0 — v86 facts_event_type_column ───────────────────────────────
+// ─── v0.40.2.0 — v87 facts_event_type_column ───────────────────────────────
 //
 // Adds nullable `event_type TEXT` to facts so the typed-claim substrate
 // (v0.35.4 / v67) can carry event-shaped rows alongside metric-shaped
 // rows. The migration is the substrate behind v0.40.2.0's `gbrain think`
 // trajectory injection AND the LongMemEval harness's intent routing.
 //
-// Renumbered v81 → v82 → v86 across two successive master merges:
+// Renumbered v81 → v82 → v87 across two successive master merges:
 //   v81 claimed by v0.38.0.0 (pages_provenance_columns).
 //   v82-v85 claimed by v0.38.1.0 (subagent_tool_executions_stable_id,
 //   mcp_spend_reservations, oauth_clients_budget_usd_per_day,
@@ -1996,33 +1996,33 @@ describe('migrate v81 — round-trip on PGLite', () => {
 // PGLite round-trip below verifies the column is queryable + nullable
 // after `initSchema()`.
 
-describe('migrate v86 — facts_event_type_column', () => {
-  const v86 = MIGRATIONS.find(m => m.version === 86);
+describe('migrate v87 — facts_event_type_column', () => {
+  const v87 = MIGRATIONS.find(m => m.version === 87);
 
-  test('v86 entry exists with the documented name', () => {
-    expect(v86).toBeDefined();
-    expect(v86!.name).toBe('facts_event_type_column');
+  test('v87 entry exists with the documented name', () => {
+    expect(v87).toBeDefined();
+    expect(v87!.name).toBe('facts_event_type_column');
   });
 
-  test('v86 is marked idempotent so re-runs are safe', () => {
-    expect(v86!.idempotent).toBe(true);
+  test('v87 is marked idempotent so re-runs are safe', () => {
+    expect(v87!.idempotent).toBe(true);
   });
 
-  test('v86 adds exactly one event_type column to facts', () => {
-    const sql = (v86!.sql ?? '').toLowerCase();
+  test('v87 adds exactly one event_type column to facts', () => {
+    const sql = (v87!.sql ?? '').toLowerCase();
     expect(sql).toContain('alter table facts add column if not exists event_type text');
     // No other column additions snuck in.
     const allAdds = sql.match(/alter table\s+facts\s+add column/g) ?? [];
     expect(allAdds.length).toBe(1);
   });
 
-  test('v86 uses IF NOT EXISTS — re-run-safe on partial states', () => {
-    const sql = (v86!.sql ?? '').toLowerCase();
+  test('v87 uses IF NOT EXISTS — re-run-safe on partial states', () => {
+    const sql = (v87!.sql ?? '').toLowerCase();
     expect(sql).toContain('add column if not exists');
   });
 
-  test('v86 column is nullable (no NOT NULL constraint, no DEFAULT)', () => {
-    const sql = (v86!.sql ?? '').toLowerCase();
+  test('v87 column is nullable (no NOT NULL constraint, no DEFAULT)', () => {
+    const sql = (v87!.sql ?? '').toLowerCase();
     // Regression guard: ADD COLUMN with NULL default is metadata-only
     // on Postgres 11+ and PGLite 17.5 — instant on tables of any size.
     // Any future contributor who adds NOT NULL or DEFAULT must update
@@ -2031,8 +2031,8 @@ describe('migrate v86 — facts_event_type_column', () => {
     expect(sql).not.toMatch(/event_type\s+text\s+default/);
   });
 
-  test('v86 does NOT create any index (event_type is selectivity-poor)', () => {
-    const sql = (v86!.sql ?? '').toLowerCase();
+  test('v87 does NOT create any index (event_type is selectivity-poor)', () => {
+    const sql = (v87!.sql ?? '').toLowerCase();
     // Documented in the migration comment: no index. event_type is a
     // low-cardinality label ('meeting', 'job_change', 'location_change');
     // the existing v67 `(entity_slug, claim_metric, valid_from)` partial
@@ -2042,8 +2042,8 @@ describe('migrate v86 — facts_event_type_column', () => {
     expect(sql).not.toContain('create index');
   });
 
-  test('v86 does NOT touch any other table', () => {
-    const sql = (v86!.sql ?? '').toLowerCase();
+  test('v87 does NOT touch any other table', () => {
+    const sql = (v87!.sql ?? '').toLowerCase();
     // The migration's blast radius is one table (facts). Any future
     // contributor extending this migration to touch other tables must
     // update this assertion deliberately — cross-table changes are how
@@ -2054,16 +2054,16 @@ describe('migrate v86 — facts_event_type_column', () => {
     }
   });
 
-  test('v86 does NOT carry a sqlFor override (engines share one SQL path)', () => {
+  test('v87 does NOT carry a sqlFor override (engines share one SQL path)', () => {
     // The migration is a simple ADD COLUMN — no engine-specific shape
     // difference. Both PGLite and Postgres replay the same SQL.
     // Pinning this prevents accidental drift if someone later adds a
     // sqlFor block that doesn't reach engine parity.
-    expect(v86!.sqlFor).toBeUndefined();
+    expect(v87!.sqlFor).toBeUndefined();
   });
 });
 
-describe('migrate v86 — round-trip on PGLite', () => {
+describe('migrate v87 — round-trip on PGLite', () => {
   let engine: PGLiteEngine;
 
   beforeAll(async () => {
@@ -2100,13 +2100,13 @@ describe('migrate v86 — round-trip on PGLite', () => {
         claim_metric, claim_value, claim_unit, claim_period, event_type
       ) VALUES (
         'default', 'people/alice', 'last met Alice at Blue Bottle', 'event', 'private',
-        '2026-04-15T00:00:00Z', 'test', 'sess-v86',
+        '2026-04-15T00:00:00Z', 'test', 'sess-v87',
         NULL, NULL, NULL, NULL, 'meeting'
       )`,
     );
     const rows = await engine.executeRaw<{ event_type: string | null; claim_metric: string | null }>(
       `SELECT event_type, claim_metric FROM facts
-        WHERE source_session = 'sess-v86' AND source_id = 'default'`,
+        WHERE source_session = 'sess-v87' AND source_id = 'default'`,
     );
     expect(rows.length).toBe(1);
     expect(rows[0].event_type).toBe('meeting');
@@ -2121,21 +2121,21 @@ describe('migrate v86 — round-trip on PGLite', () => {
         claim_metric, claim_value, claim_unit, claim_period, event_type
       ) VALUES (
         'default', 'companies/acme', 'MRR = 100K', 'fact', 'private',
-        '2026-04-01T00:00:00Z', 'test', 'sess-v86-metric',
+        '2026-04-01T00:00:00Z', 'test', 'sess-v87-metric',
         'mrr', 100000, 'USD', 'monthly', NULL
       )`,
     );
     const rows = await engine.executeRaw<{ event_type: string | null; claim_metric: string | null }>(
       `SELECT event_type, claim_metric FROM facts
-        WHERE source_session = 'sess-v86-metric'`,
+        WHERE source_session = 'sess-v87-metric'`,
     );
     expect(rows.length).toBe(1);
     expect(rows[0].event_type).toBeNull();
     expect(rows[0].claim_metric).toBe('mrr');
   });
 
-  test('LATEST_VERSION is at or above v86 after this wave lands', () => {
-    expect(LATEST_VERSION).toBeGreaterThanOrEqual(86);
+  test('LATEST_VERSION is at or above v87 after this wave lands', () => {
+    expect(LATEST_VERSION).toBeGreaterThanOrEqual(87);
   });
 });
 
