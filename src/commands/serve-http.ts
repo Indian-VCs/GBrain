@@ -1584,6 +1584,30 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       const authInfo = (req as Request & { auth?: AuthInfo }).auth as AuthInfo;
       const agentName = authInfo.clientName ?? authInfo.clientId;
 
+      // v0.38.3.0 BUG-2: outer try/catch ensures any unexpected throw
+      // returns a JSON envelope instead of leaking express's default HTML
+      // error page. Mirrors the MCP handler's F14 pattern (serve-http.ts
+      // F14 envelope around transport.handleRequest). The `!res.headersSent`
+      // guard (codex F#16) prevents a second-response attempt if the throw
+      // happens after the inner queue.add try/catch already responded.
+      try {
+
+      // v0.38.3.0 BUG-2: explicit null/undefined guard BEFORE body coercion.
+      // When the request has no body at all (no Content-Length header, no
+      // body-parser fed us anything), `req.body` is `undefined`. The pre-fix
+      // code's `else` branch called `Buffer.from(JSON.stringify(undefined),
+      // 'utf8')` — and `JSON.stringify(undefined) === undefined` (the
+      // literal, not the string), which makes `Buffer.from(undefined, 'utf8')`
+      // throw TypeError. Express's default error handler then served an HTML
+      // 500 page. Guard fires first to keep the response shape JSON.
+      if (req.body == null) {
+        res.status(400).json({
+          error: 'empty_body',
+          message: 'POST /ingest requires a non-empty body',
+        });
+        return;
+      }
+
       // Express raw() returns a Buffer. Decode as UTF-8; reject non-UTF-8
       // bytes loudly so callers know their payload was garbled.
       let body: Buffer;
@@ -1593,7 +1617,9 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         body = Buffer.from(req.body, 'utf8');
       } else {
         // express.json or urlencoded fired earlier in the chain and parsed
-        // for us. Re-serialize so we can hash and forward.
+        // for us. Re-serialize so we can hash and forward. The null/undefined
+        // case is already guarded above so JSON.stringify produces a real
+        // string here (objects round-trip, primitives become their JSON form).
         body = Buffer.from(JSON.stringify(req.body), 'utf8');
       }
 
@@ -1720,6 +1746,22 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
           error: 'queue_submission_failed',
           message: msg,
         });
+      }
+
+      // v0.38.3.0 BUG-2: outer try/catch close — anything that throws BEFORE
+      // the inner queue.add try/catch lands here. The headersSent guard
+      // (codex F#16) skips the second-response attempt if the inner block
+      // already wrote a response and then threw on a downstream line (e.g.
+      // a logging side-effect after `res.status(202).json(...)`).
+      } catch (outerErr) {
+        const msg = outerErr instanceof Error ? outerErr.message : String(outerErr);
+        console.error('POST /ingest unexpected handler error:', msg);
+        if (!res.headersSent) {
+          res.status(500).json({
+            error: 'internal_error',
+            message: msg,
+          });
+        }
       }
     },
   );
