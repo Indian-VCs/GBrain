@@ -20,8 +20,11 @@ triggers:
   - "where does this research go"
   - "make this permanent"
   - "archive this research"
+  - "archive this research thread"
   - "brain this"
+  - "file all of this"
   - "organize all of this"
+  - "organize all of this work"
   - "make this re-doable"
   - "DRY this up"
   - "check everything is in the right place"
@@ -34,8 +37,23 @@ tools:
   - add_timeline_entry
 mutating: true
 writes_pages: true
+# EIIRP files across the full canonical set — the actual destination
+# per page is decided by brain-taxonomist consulting the active schema
+# pack via `gbrain schema show --json`. List the gbrain-recommended set
+# of canonical directories here so the filing-audit gate passes; on
+# brains with custom packs, the routing surface is broader and routes
+# through loadActivePack at write time.
 writes_to:
-  - "{determined by active schema pack via `gbrain schema show --json`}"
+  - people/
+  - companies/
+  - deals/
+  - meetings/
+  - concepts/
+  - projects/
+  - civic/
+  - writing/
+  - analysis/
+  - guides/
 filing_exempt: true
 distinct_from:
   - name: brain-taxonomist
@@ -293,6 +311,55 @@ Confirm:
 - Active pack: [name] v[version]
 - schema_pack_consistency: [ok / warn — pct untyped]
 ```
+
+## Output Format
+
+EIIRP produces a single Phase 7 report block. Plain markdown:
+
+```markdown
+## EIIRP Complete: [topic]
+
+### Brain pages created/updated
+- [path] — [description]
+
+### Entity pages
+- [path] — [created|updated]
+
+### Schema changes
+- [none | description of changes + which pack delta file]
+
+### Skills identified
+- [skill-name] — [status: created|merged|deferred]
+
+### Resolver status
+- DRY check: [clean|N violations]
+- MECE audit: [clean|N overlaps]
+- Active pack: [name] v[version]
+- schema_pack_consistency: [ok|warn — N% untyped]
+```
+
+Always machine-readable: stable section headers + bullet-per-item. The
+report doubles as a sync checkpoint for downstream skills (skillpack-check
+reads it; doctor cross-references the pack version).
+
+## Anti-Patterns
+
+- **Hardcoding directory tables in EIIRP's logic.** Every filing decision
+  reads `gbrain schema show --json`. Users on `gbrain-recommended` AND
+  custom packs MUST get the right behavior automatically. Pinned by D9
+  from /plan-eng-review.
+- **Auto-applying low-confidence schema suggestions.** Confidence < 0.6
+  from `gbrain schema suggest` is "manual review required" per codex
+  finding #9. EIIRP surfaces it; the user accepts.
+- **Skipping Phase 5 SKILL GRAPH AUDIT because "this was a one-off."**
+  If the work took >10 minutes, the methodology is probably reusable.
+  Audit anyway; defer the skillify decision to the user.
+- **Filing synthesis output by topic alone.** Synthesis pages tied to a
+  single source + reader are sui generis; they file under
+  `media/<format>/<slug>-personalized.md`. See _brain-filing-rules.md
+  "Sanctioned exception" section.
+- **Treating non-English sources as secondary citations.** Multilingual
+  sources are first-class.
 
 ## Hard Rules
 

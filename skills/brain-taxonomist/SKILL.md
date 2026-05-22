@@ -15,6 +15,7 @@ triggers:
   - "refile brain page"
   - "create brain page"
   - "which directory does this go"
+  - "which directory does this page go"
 mutating: false
 ---
 
@@ -25,6 +26,15 @@ mutating: false
 **Gate function:** Before creating ANY new brain page, consult this skill to determine the correct filing path. This prevents misfiling at write time rather than cleaning up drift after the fact.
 
 **Drift function:** Periodic scan for pages that have outgrown their current location.
+
+## Contract
+
+This skill guarantees:
+- Every new page is filed at the path determined by the ACTIVE schema pack — never against a hardcoded directory table baked into this skill.
+- The decision is reproducible: invoking brain-taxonomist twice on the same content produces the same recommended path.
+- Ambiguous cases surface to the user via `skills/ask-user/` rather than silently picking a default.
+- Per-source overrides via `--source <id>` are honored — multi-brain users (Persona B) get a different recommendation per source if their packs diverge.
+- When no matching `page_types[]` entry exists in the active pack, the skill signals to EIIRP Phase 3 (SCHEMA CHECK) rather than picking the closest-fitting fallback.
 
 ## Critical: this skill reads the ACTIVE schema pack as data
 
@@ -122,6 +132,46 @@ gbrain doctor --json | jq '.checks[] | select(.name == "schema_pack_consistency"
 
 When `schema_pack_consistency` warns at >10% untyped, run the EIIRP
 Phase 3 SCHEMA CHECK flow to surface candidate types via `schema detect`.
+
+## Output Format
+
+Advisory: a single recommendation block plus a one-line reasoning trail.
+
+```markdown
+**File at:** `<directory>/<slug>.md`
+**Reasoning:**
+- Primary subject: <person|company|concept|...>
+- Matched page_type: <name> (primitive: <entity|temporal|concept|media|annotation>)
+- Active pack: <pack-name> v<version>
+- Source: <source_id>
+```
+
+When ambiguous, surface 2 candidates via `skills/ask-user/` rather than
+silently choosing.
+
+When the active pack has NO matching type, signal to EIIRP Phase 3
+(SCHEMA CHECK) and emit:
+
+```markdown
+**No match in active pack `<name>`.**
+**Suggested next step:** `gbrain schema detect --source <source_id>` then
+`gbrain schema review-candidates`.
+```
+
+## Anti-Patterns
+
+- **Hardcoded directory table in this skill.** Every decision goes through
+  `gbrain schema show --json`. v0.39+ broke the old hardcoded table on
+  purpose so users on `gbrain-recommended` or custom packs get the right
+  routing automatically.
+- **Picking the closest-fitting type when no type matches.** Closest-fit
+  silently degrades user filing. Surface to EIIRP Phase 3 instead.
+- **Ignoring `--source <id>` on multi-brain setups.** Per-source overrides
+  are tier-3 in the 7-tier resolution chain; missing the flag silently
+  uses the brain-wide active pack.
+- **Auto-applying a `gbrain schema review-candidates --apply` decision.**
+  Even high-confidence suggestions need user approval — this skill is a
+  GATE, not an automator.
 
 ## Hard Rules
 
