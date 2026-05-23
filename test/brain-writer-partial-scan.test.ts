@@ -153,11 +153,15 @@ describe('scanBrainSources partial-scan state', () => {
   // The post-await deadline re-check should mark the source as 'skipped'.
   test('slow COUNT that exceeds deadline marks source skipped, not partial', async () => {
     const start = Date.now();
+    // CI timing fix (same class as the "hanging COUNT" test below): widened
+    // 50→250ms deadline + 100→500ms simulated query delay. Keeps the 2x
+    // ratio that proves "query exceeds deadline" while giving CI runners
+    // enough headroom to schedule both setTimeout callbacks on-budget.
     const report = await scanBrainSources(engine, {
-      deadline: start + 50, // 50ms budget
+      deadline: start + 250,
       dbPageCountForSource: async () => {
-        // Simulate a hung query: take 100ms (past the deadline).
-        await new Promise(resolve => setTimeout(resolve, 100));
+        // Simulate a hung query: take 500ms (past the deadline).
+        await new Promise(resolve => setTimeout(resolve, 500));
         return 42;
       },
     });
@@ -175,16 +179,24 @@ describe('scanBrainSources partial-scan state', () => {
   // resolve null and the scan must abort cleanly.
   test('hanging COUNT does not exceed deadline — Promise.race timeout fires', async () => {
     const start = Date.now();
+    // CI timing fix: bumped deadline 100→500ms + bound 500→2500ms. On GitHub
+    // Actions runners under shard parallelism, the Node.js timer driving
+    // Promise.race can drift well past 100ms (observed: 187ms on a single
+    // CI run with no obvious load). The test asserts behavior under the
+    // deadline-fires path, not a specific budget value — so widening the
+    // window keeps the intent and removes the flake. The 5x ratio (deadline
+    // 500 / bound 2500) is unchanged.
+    const DEADLINE_MS = 500;
+    const BOUND_MS = 2500;
     const report = await scanBrainSources(engine, {
-      deadline: start + 100, // 100ms budget
+      deadline: start + DEADLINE_MS,
       dbPageCountForSource: () => {
         // Never resolves — would hang forever without the deadline race.
         return new Promise<number | null>(() => {});
       },
     });
     const elapsed = Date.now() - start;
-    // Generous bound: should complete within 2x the deadline budget (setup overhead).
-    expect(elapsed).toBeLessThan(500);
+    expect(elapsed).toBeLessThan(BOUND_MS);
     expect(report.partial).toBe(true);
     const firstSource = report.per_source.find(r => r.source_id === 'src-a')!;
     expect(firstSource.status).toBe('skipped');
