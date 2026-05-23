@@ -692,6 +692,7 @@ async function runGraphCmd(args: string[]): Promise<void> {
 
 async function runLintCmd(args: string[]): Promise<void> {
   const { json, positional } = parseFlags(args);
+  const withDb = args.includes('--with-db');
   const name = positional[0];
   const cfg = loadConfig();
   let pack: SchemaPackManifest | null;
@@ -705,25 +706,33 @@ async function runLintCmd(args: string[]): Promise<void> {
     console.error(`Pack not found: ${name}`);
     process.exit(1);
   }
-  const warnings: string[] = [];
-  const seenTypeNames = new Set<string>();
-  for (const t of pack.page_types) {
-    if (seenTypeNames.has(t.name)) warnings.push(`duplicate type name: ${t.name}`);
-    seenTypeNames.add(t.name);
-    if (!t.path_prefixes || t.path_prefixes.length === 0) {
-      warnings.push(`type \`${t.name}\` has no path_prefixes — unreachable by inferType`);
-    }
-  }
+  // v0.40.6.0 Phase 5: swap basic 2-rule check for the rich 11-rule lint
+  // suite from Phase 1.5. File-plane rules run by default; --with-db
+  // opts into extractable_empty_corpus + mutation_count_anomaly which
+  // need an engine connection.
+  const { runAllLintRules } = await import('../core/schema-pack/lint-rules.ts');
+  const report = withDb
+    ? await withConnectedEngine(async (engine) => runAllLintRules(pack!, { engine }))
+    : await runAllLintRules(pack);
   if (json) {
-    console.log(JSON.stringify({ schema_version: 1, pack: pack.name, warnings }, null, 2));
+    console.log(JSON.stringify({ schema_version: 1, pack: pack.name, ...report }, null, 2));
+    if (!report.ok) process.exit(1);
     return;
   }
-  if (!warnings.length) {
+  if (report.ok && report.warnings.length === 0) {
     console.log(`OK — pack \`${pack.name}\` lint clean.`);
     return;
   }
   console.log(`Pack \`${pack.name}\` lint:`);
-  for (const w of warnings) console.log(`  warn: ${w}`);
+  for (const e of report.errors) {
+    console.log(`  ERROR (${e.rule}): ${e.message}`);
+    if (e.hint) console.log(`    hint: ${e.hint}`);
+  }
+  for (const w of report.warnings) {
+    console.log(`  warn (${w.rule}): ${w.message}`);
+    if (w.hint) console.log(`    hint: ${w.hint}`);
+  }
+  if (!report.ok) process.exit(1);
 }
 
 async function runExplainCmd(args: string[]): Promise<void> {
