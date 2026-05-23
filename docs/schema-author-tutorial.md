@@ -2,6 +2,8 @@
 
 You'll fork the bundled `gbrain-base` pack, add a custom `researcher` page type, import a handful of placeholder researcher pages, backfill their `page.type` column with one command, then prove the wiring works by running `gbrain whoknows` and seeing your new type surface in results. End state: a forked-and-active pack on disk, ~5 pages typed as `researcher`, and a query that proves the pack-aware routing fires end-to-end.
 
+**Want the WHY before the HOW?** Read [`what-schemas-unlock.md`](what-schemas-unlock.md) first — 7 concrete use cases (4000 invisible meetings, the founder ops brain, the research brain, the legal brain, the team brain, agent-as-co-curator) plus the structural argument for why types matter at query time. Then come back here for the 5-minute walkthrough.
+
 The whole walkthrough takes about 5 minutes. You'll see something working by step 3.
 
 ## What you'll need

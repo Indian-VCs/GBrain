@@ -92,9 +92,10 @@ Invoke when the user (or a sibling skill) says any of:
 DON'T invoke for "where does THIS note go" (use brain-taxonomist) or
 "who knows about X" (use expert-routing / `gbrain whoknows`).
 
-## Tutorial
+## Tutorial + vision
 
-New to schema authoring? See [`docs/schema-author-tutorial.md`](../../docs/schema-author-tutorial.md) for a 5-minute walkthrough from `gbrain schema fork` to `gbrain whoknows` surfacing a custom type. The tutorial uses placeholder pages so you can run it against any brain without affecting real content.
+- **Why this matters:** [`docs/what-schemas-unlock.md`](../../docs/what-schemas-unlock.md) — 7 killer use cases (4000 invisible meetings made queryable, founder ops brain, research brain, legal brain, team brain, agent-as-co-curator) plus the structural argument for why types matter at query time. Read this before pitching schema authoring to a user — it's the doc that explains the difference between a pile of notes and a brain with structure.
+- **5-minute walkthrough:** [`docs/schema-author-tutorial.md`](../../docs/schema-author-tutorial.md) — fork the bundled pack, add a researcher type, sync, prove the T1.5 wiring via `gbrain whoknows`. Use placeholder pages so it runs against any brain without affecting real content.
 
 ## Workflow
 
