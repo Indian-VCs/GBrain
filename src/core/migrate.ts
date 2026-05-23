@@ -4016,8 +4016,46 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 89,
+    name: 'facts_event_type_column',
+    // v0.40.2.0 — trajectory routing wave.
+    //
+    // Adds nullable `event_type TEXT` to facts so the existing typed-claim
+    // substrate (v0.35.4 / v67) can carry event-shaped rows (e.g.
+    // event_type='meeting', 'job_change', 'location_change') alongside
+    // metric-shaped rows (claim_metric / claim_value etc). Temporal-
+    // reasoning LongMemEval questions ask about event chronology that the
+    // metric-only shape couldn't carry; this column is the minimum
+    // schema extension that lets `findTrajectory` surface event rows
+    // alongside metric rows in one chronological stream.
+    //
+    // Column-only, no index. Existing callers (founder-scorecard,
+    // eval-trajectory, gbrain think) already defensively skip NULL-metric
+    // rows in their per-metric math, so event-only rows ride through
+    // invisibly. Structured event fields (object/actor/location) are
+    // deferred to v0.40.3+ once usage shows what fields are needed.
+    //
+    // ADD COLUMN with no DEFAULT (NULL) is metadata-only on Postgres 11+
+    // and PGLite; instant on tables of any size. No bootstrap probe
+    // needed (no index, no FK references this column) — exemption pinned
+    // in test/schema-bootstrap-coverage.test.ts COLUMN_EXEMPTIONS.
+    //
+    // Renumbered v81→v82→v86→v87→v89 across four master merges:
+    //   v81 claimed by v0.38.0.0 (pages_provenance_columns).
+    //   v82-v85 claimed by v0.38.1.0 (subagent_tool_executions_stable_id,
+    //   mcp_spend_reservations, oauth_clients_budget_usd_per_day,
+    //   oauth_clients_agent_binding).
+    //   v86 claimed by v0.39.0.0 (page_links_view_alias).
+    //   v87-v88 claimed by v0.39.1.0 (takes_kind_drop_check,
+    //   eval_candidates_schema_pack_per_source).
+    idempotent: true,
+    sql: `
+      ALTER TABLE facts ADD COLUMN IF NOT EXISTS event_type TEXT;
+    `,
+  },
+  {
+    version: 90,
     name: 'sources_github_repo_index',
-    // v0.41 Federated Sync v2 (D13): partial expression index on
+    // v0.40.5.0 Federated Sync v2 (D13): partial expression index on
     // sources.config->>'github_repo' so the new POST /webhooks/github
     // handler's source-by-repo lookup uses an index instead of a sequential
     // scan. Sources is small today (<100 rows in practice) so the impact is
@@ -4029,10 +4067,9 @@ export const MIGRATIONS: Migration[] = [
     // PGLite support partial expression indexes; no engine-specific shape.
     // Idempotent (IF NOT EXISTS).
     //
-    // Plan called this v81 originally; renumbered through v87 → v89 across
-    // successive master merges. Bootstrap probes mirror the v0.22.6.1
-    // pattern (applyForwardReferenceBootstrap) so legacy brains pick up the
-    // index through initSchema() too.
+    // Plan called this v81 originally; renumbered through v87 → v89 → v90
+    // across successive master merges (v0.40.2.0 claimed v89 for
+    // facts_event_type_column).
     sql: `
       CREATE INDEX IF NOT EXISTS sources_github_repo_idx
         ON sources ((config->>'github_repo'))
