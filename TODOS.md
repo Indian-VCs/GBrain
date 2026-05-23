@@ -1,5 +1,162 @@
 # TODOS
 
+## v0.41+ wave commitments (decided 2026-05-23)
+
+Source: `/plan-ceo-review` + `/plan-eng-review` triage of TODOS as roadmap
+signal. Plan file: `~/.claude/plans/system-instruction-you-are-working-dazzling-pnueli.md`.
+Three strategic decisions landed and the 7 verified-absent items the
+analysis surfaced were approved for filing.
+
+### D1 — v0.41 Eval-loop wave (NEXT, P0)
+
+The eval/quality-gate cluster has all the substrate (eval_candidates table,
+`eval export/replay`, cross-modal runner, nightly probe, audit JSONL) but
+the LOOP is barely live. Three blocking moves turn "gbrain has eval infra"
+into "gbrain is self-improving."
+
+- [ ] **P0 — `gbrain eval gate <baseline.ndjson>` for CI.** The single most
+  load-bearing missing item across all 12 clusters. Fails the build on
+  regression vs the last published BrainBench-Real baseline. Without it,
+  every other eval surface is informational, not gating. Shape: reads
+  the captured/replay NDJSON shape from v0.25.0+, compares mean_jaccard +
+  top-1 stability against thresholds embedded in the baseline file, exits
+  non-zero on regression. Filed in the v0.40.1.0 Track D follow-up
+  ("v0.41+: contributor-mode CI capture for BrainBench-Real replay gate")
+  but that item describes the data pipeline; this item is the gate verb
+  itself. Effort: human ~1 day / CC ~2 hours once a stable baseline exists.
+
+- [ ] **P0 — Contributor-mode eval capture ON by default with airtight
+  privacy.** Today `eval.capture` defaults OFF; only contributors who
+  set `GBRAIN_CONTRIBUTOR_MODE=1` produce `eval_candidates` rows. Without
+  capture flowing, replay-against-baseline gates have nothing to replay
+  AGAINST in production. Move: harden the PII scrubber (verify Luhn
+  card-number false-positive rate, audit JWT-shape regex, document
+  every scrub class), then flip the default. Add a one-line opt-out
+  banner on first `gbrain init` post-upgrade. Cross-reference the
+  `eval_capture_failures.reason` enum cleanup from the v0.25.0 P1 surgical
+  hardenings list. Effort: human ~3 days / CC ~3 hours.
+
+- [ ] **P0 — Wire nightly quality probe into autopilot scheduler.** The
+  phase ships callable (`src/core/cycle/nightly-quality-probe.ts`) with
+  full DI surface; doctor surfaces outcomes; the audit JSONL rotates
+  cleanly. What's NOT wired: `src/commands/autopilot.ts` doesn't invoke
+  `runNightlyQualityProbe(deps)` on its 24h cadence. Add the phase
+  trigger; honor `autopilot.nightly_quality_probe.enabled` config gate.
+  Already filed in v0.40.1.0 Track D follow-ups — re-filing here as P0
+  with explicit D1-wave dependency. Effort: human ~3 hours / CC ~30 min.
+
+### D2 — Code-indexing promoted to P1 (peer of Cursor/Sourcegraph)
+
+Decision: gbrain commits to being a code-brain peer of dedicated tools,
+not "knowledge brain that also indexes code." The five code-indexing
+TODOs below promoted from P2/P3 to P1. Plan reference: v0.21 Code
+Cathedral II was the last big push; this wave revives the trajectory.
+
+- [ ] **P1 — `.sql` file indexing (#1173).** Vendor `tree-sitter-sql.wasm`
+  into `src/assets/wasm/grammars/`, extend sync walker's extension filter
+  to include `.sql`, route through `importCodeFile()` with
+  `page_kind='code'`. Verify-first slug round-trip before merging (codex
+  CF11 from v0.37.7.0). Pre-existing entry under v0.37.7.0 follow-ups
+  — keep that one, this is just the priority bump.
+- [ ] **P1 — Magika auto-detect for extension-less files (B2 from v0.21).**
+  Bundle Google's Magika ONNX (~1MB) as an asset; wire into
+  `detectCodeLanguage` as fallback for Dockerfile / Makefile / .envrc
+  / shell scripts. Hook already exists (`setLanguageFallback` in
+  `src/core/chunkers/code.ts`). Closes the last common extension-less case.
+- [ ] **P1 — Full `doc_comment` extraction at chunk time (A4 from v0.21).**
+  Per-language detection of comment-blocks-preceding-declarations
+  (JSDoc, Python docstrings, C-style doc comments). Populates
+  `content_chunks.doc_comment`. FTS trigger from Layer 1b already
+  weights doc_comment 'A' above chunk_text 'B' — ranking is ready, only
+  extraction is missing. Material MRR lift on natural-language code
+  queries.
+- [ ] **P1 — Cross-file edge resolution (Layer 5 precision upgrade).**
+  Second-pass resolution after all code files import: walk every
+  `code_edges_symbol` row, try to resolve `to_symbol_qualified` via
+  `symbol_name_qualified` join within the same source. Today
+  `getCallersOf("searchKeyword")` returns Layer 6 ambiguity — every
+  call site in any class. Receiver-type inference lifts this. Per-language;
+  TypeScript-first.
+- [ ] **P1 — gbrain code-signature retrieval (C6 from v0.21).** "Find every
+  function whose signature returns `Promise<User>`" or "(string, number)
+  => boolean". Type-signature retrieval via tree-sitter type captures.
+  Per-language stretch; TypeScript-first.
+
+### D3 — v0.42 Non-Latin script wave (global by design)
+
+Decision: gbrain commits to first-class non-Latin support. The five
+existing "defer until first user complains" entries get consolidated
+into one committed wave with a target version.
+
+- [ ] **v0.42 — Postgres CJK FTS via pgroonga / zhparser / ngram trigrams.**
+  Multi-tenant Postgres deployments hit empty results for CJK queries
+  because `to_tsvector('english', ...)` can't segment Chinese / Japanese
+  / Korean. Plan: doctor advisory pointing at extension docs;
+  searchKeyword falls through to PGLite-style ILIKE when extension
+  isn't installed. v0.32.7 closed PGLite-side; this closes Postgres-side.
+- [ ] **v0.42 — Widen CJK ranges to Unicode property escapes.** Today
+  `src/core/cjk.ts` uses BMP-only ranges. Misses Han Extensions A/B/C,
+  halfwidth katakana, compatibility ideographs, iteration marks `々` `〇`.
+  Switch to `\p{Script=Han}` / `\p{Script=Hiragana}` / `\p{Script=Katakana}`
+  / `\p{Script=Hangul}`. Astral-plane support also requires
+  `Array.from(str)` codepoint iteration in chunker's char-slice fallback.
+- [ ] **v0.42 — CJK-aware overlap context in chunker.** `extractTrailingContext`
+  is whitespace-token-based today; CJK chunks under maxChars cap have no
+  useful overlap with previous chunk. Switch to char-count when
+  `countCJKAwareWords` would have triggered the CJK branch.
+- [ ] **v0.42 — Thai / Arabic / Cyrillic / Devanagari script support.**
+  Same five-layer fix pattern as CJK: slugify ranges, chunker density
+  threshold, PGLite keyword fallback with script-aware tokenization.
+- [ ] **v0.42 — `git diff --name-status -z` + NUL framing.** v0.32.7
+  added `core.quotepath=false` which handles non-ASCII paths but doesn't
+  cover tabs, newlines, or quotes in filenames. NUL-byte path framing
+  is the robust fix for the whole encoding class. Affects
+  `src/commands/sync.ts:buildDetachedWorkingTreeManifest` +
+  `buildSyncManifest`.
+
+### Verified-missing items — filed into TODOS (P2 unless noted)
+
+Each grep-verified absent before being claimed missing. Priority per the
+cluster the item sits in. Filed here together for traceability; future
+cleanup can move each into the relevant area section.
+
+- [ ] **P2 — `gbrain sources promote <id> <target-source>`** — write-side
+  counterpart to mounting. Today federation is read-side only; promotion
+  is the unfiled symmetric verb. (Federation cluster.)
+- [ ] **P2 — `--explain` auto-on during `gbrain eval replay`** — so
+  regression reports show WHY a page dropped from top-3, not just THAT
+  it did. (Search-quality cluster.)
+- [ ] **P2 — Extend `gbrain remote doctor` to stream brain's audit JSONL
+  summaries.** Closes the local/remote observability split-brain
+  (T-todo-3 from v0.40.4 covers the DB-table side; this is the read-side
+  surface). (Observability cluster.)
+- [ ] **P2 — `gbrain costs`** — surfaces per-command, per-source, per-week
+  spend. Data is in audit JSONL already; nothing reads it together.
+  Pairs naturally with the P5 budgets config block from the v0.37 lsd
+  cost-explosion follow-up. (Observability cluster.)
+- [ ] **P2 — `gbrain jobs explain <id>`** — full job-graph trace (parent
+  → children → tools called → tokens spent → outcome). Today
+  `gbrain agent logs <id>` covers subagents but not the broader job
+  graph. (Worker cluster.)
+- [ ] **P2 — `docs/security/threat-model.md`** — catalog every untrusted
+  boundary in gbrain (MCP, OAuth, capture, sync remote URLs, file_upload,
+  webhook ingest, subagent tool dispatch) and link each to its defense.
+  Defenses exist (v0.26.5 destructive-guard, v0.26.7 OAuth hardening,
+  v0.34.1 source-isolation P0 seal, v0.36 SSRF); the catalog does not.
+  Verified absent: `docs/security/` directory doesn't exist.
+  (Safety cluster.)
+- [ ] **P3 — `gbrain doctor --thin-client` parity probe** — compares
+  the same query against local PGLite vs remote HTTP MCP and surfaces
+  behavior drift. Static parity test (filed in v0.31.x follow-ups)
+  catches API drift; this catches behavior drift. (Agent ergonomics cluster.)
+- [ ] **P3 — `gbrain models migrate --from openai:text-embedding-3-large
+  --to voyage:voyage-3-large`** — estimates cost, schedules re-embed
+  via Minion job, swaps active column atomically. Column-registry
+  primitive exists (`embedding_columns` from v0.36.3); migration verb
+  doesn't. (Embedding cluster.)
+
+---
+
 ## v0.40.3.0 follow-ups (v0.41+)
 
 - [ ] **v0.41+: source-scope the `sync-failures.jsonl` log so `--skip-failed` works under `--parallel > 1`.**

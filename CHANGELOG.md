@@ -2,6 +2,27 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.40.6.1] - 2026-05-23
+
+**TODOS.md gets a wave-commitments register at the top.** A `/plan-ceo-review` + `/plan-eng-review` pass clustered the 110 open TODOs into 12 feature themes, articulated the platonic ideal for each, and surfaced three strategic decisions. All three landed on the most ambitious option, and the seven verified-absent items the analysis caught got filed. Nothing in `src/` changed.
+
+The new top section in TODOS.md is the canonical register for the next wave; the rest of the file is unchanged. Plan analysis at `~/.claude/plans/system-instruction-you-are-working-dazzling-pnueli.md` documents the cluster taxonomy + methodology caveats + 7 grep-verified missing items.
+
+## To take advantage of v0.40.6.1
+
+No action required — this is a docs-only release. The wave commitments below land in TODOS.md and inform what `v0.41` and `v0.42` ship.
+
+### Itemized changes
+
+#### TODOS register at top of TODOS.md
+
+- **D1 — v0.41 Eval-loop wave (3× P0):** `gbrain eval gate <baseline>` CI verb (the single most load-bearing missing item across all 12 clusters), contributor-mode eval capture ON by default with airtight privacy, wire nightly quality probe into autopilot scheduler. Substrate is 80% built; the LOOP is 10% wired. These three close the loop.
+- **D2 — Code-indexing promoted to P1 (5 items):** `.sql` file indexing (#1173), Magika auto-detect for extension-less files, full `doc_comment` extraction at chunk time, cross-file edge resolution (Layer 5 precision), code-signature retrieval (per-language). gbrain commits to peer-of-Cursor/Sourcegraph posture.
+- **D3 — v0.42 Non-Latin script wave (5 items):** Postgres CJK FTS via pgroonga/zhparser, widen CJK ranges to Unicode property escapes, CJK-aware overlap context in chunker, Thai/Arabic/Cyrillic/Devanagari support, `git diff --name-status -z` NUL framing. gbrain commits to global-by-design.
+- **Verified-missing items (8):** `gbrain sources promote`, `--explain` auto-on during `gbrain eval replay`, extend `gbrain remote doctor` to stream audit JSONL, new `gbrain costs` command, `gbrain jobs explain <id>`, `docs/security/threat-model.md` catalog, `gbrain doctor --thin-client` parity probe, `gbrain models migrate`. Each grep-verified absent before filing.
+
+Five items duplicate older entries lower in TODOS.md (`.sql` indexing, Magika, doc_comment, CJK items) — duplication noted inline. The new top section is the canonical wave-commitment register; historical entries stay as detail.
+
 ## [0.40.6.0] - 2026-05-23
 
 **`gbrain sync --all` now syncs your sources at the same time instead of one after the other, and you can see the health of every source at a glance with `gbrain sources status`.** If you have a brain with 4+ sources connected to it, the cron job that keeps everything up to date used to take as long as the slowest source. One stuck `git pull` on a big media-corpus repo held up everything else, and after 24 hours you'd start seeing stale-data warnings pile up. Now the sources run together — independent ones don't wait on each other, and you can run `gbrain sources status` to see at a glance which ones are fresh, stale, or running behind. Per-source log lines come prefixed with `[source-id]` so you can grep one source's output cleanly even when several are running.
