@@ -398,3 +398,7 @@ simultaneously — that's by design.
   vs sources axes).
 - `docs/mcp/CLAUDE_DESKTOP.md` and siblings — per-client MCP setup.
 - `gbrain init --help` and `gbrain auth --help` for command-level details.
+- [`docs/tutorials/company-brain.md`](../tutorials/company-brain.md) — end-to-end
+  walkthrough that combines Topology 2 (cross-machine thin client) with
+  federated multi-source scoping. The "I'm setting this up for a 10-50 person
+  company" recipe.
