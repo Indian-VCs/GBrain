@@ -146,11 +146,17 @@ describe('v0.40.10.0 #1247/#1269/#1290 — drain last-retrieved before CLI disco
     expect(drainIdx).toBeLessThan(disconnectIdx);
   });
 
-  test('cli.ts shouldForceExitAfterMain excludes "serve" so daemons stay alive', () => {
+  test('cli.ts uses shouldForceExitAfterMain only on the timeout path', () => {
     const src = readFileSync('src/cli.ts', 'utf8');
-    expect(src).toMatch(/function\s+shouldForceExitAfterMain/);
-    expect(src).toMatch(/command\s*!==\s*['"]serve['"]/);
+    expect(src).toMatch(/import\s+\{\s*shouldForceExitAfterMain\s*\}\s*from\s+['"]\.\/core\/cli-force-exit\.ts['"]/);
+    // The force-exit gate MUST be conditioned on drainResult.outcome ==='timeout'
     expect(src).toMatch(/drainResult\.outcome\s*===\s*['"]timeout['"]/);
+  });
+
+  test('cli-force-exit.ts daemon guard excludes "serve"', () => {
+    const src = readFileSync('src/core/cli-force-exit.ts', 'utf8');
+    expect(src).toMatch(/export function shouldForceExitAfterMain/);
+    expect(src).toMatch(/DAEMON_COMMANDS[\s\S]*serve/);
   });
 });
 

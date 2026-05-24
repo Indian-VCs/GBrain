@@ -11,6 +11,7 @@ import type { BrainEngine } from './core/engine.ts';
 import { operations, OperationError } from './core/operations.ts';
 import type { Operation, OperationContext } from './core/operations.ts';
 import { awaitPendingLastRetrievedWrites } from './core/last-retrieved.ts';
+import { shouldForceExitAfterMain } from './core/cli-force-exit.ts';
 import { serializeMarkdown } from './core/markdown.ts';
 import { parseGlobalFlags, setCliOptions, getCliOptions } from './core/cli-options.ts';
 import type { CliOptions } from './core/cli-options.ts';
@@ -231,18 +232,6 @@ async function main() {
   }
 }
 
-/**
- * v0.40.10.0 — gate for the narrow timeout-only force-exit in the
- * op-dispatch finally block. Excludes daemons (currently just `serve`)
- * so `gbrain serve --http` and the stdio MCP path stay alive past
- * main(). Mirrors PR #1337's `shouldForceExitAfterMain` guard, but
- * narrower in scope: we only force-exit AFTER the drain timed out,
- * not unconditionally for every non-serve command.
- */
-export function shouldForceExitAfterMain(argv: string[] = process.argv.slice(2)): boolean {
-  const command = argv.find((arg) => !arg.startsWith('-'));
-  return command !== 'serve';
-}
 
 function hasHelpFlag(args: string[]): boolean {
   return args.includes('--help') || args.includes('-h');
