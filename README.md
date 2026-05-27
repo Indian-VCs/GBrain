@@ -313,6 +313,16 @@ Bad values surface at `gbrain doctor` startup with a paste-ready fix
 retry wrap is engine-level, but PGLite has no pooler so retries never
 fire in practice.
 
+**`gbrain brainstorm` returning `judge_failed: true` with 0 scored
+ideas?** v0.41.21.0 closes the two bugs that caused it. The judge
+hard-coded a 4K-token output cap; for any run past ~40 ideas the call
+truncated mid-JSON and the parser threw. Same release closes a slash-
+form pricing miss: `gbrain brainstorm --judge-model
+anthropic/claude-sonnet-4-6 --max-cost 5` failed with
+`BudgetExhausted reason=no_pricing` because every pricing site only
+matched the colon form. Both shapes work now. No config change, no
+schema migration — `gbrain upgrade` is the whole fix.
+
 ## Docs
 
 - [`docs/INSTALL.md`](docs/INSTALL.md) — every install path, end to end
