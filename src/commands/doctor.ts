@@ -566,6 +566,11 @@ export async function doctorReportRemote(engine: BrainEngine): Promise<DoctorRep
   // v0.41 Bug 2 / Eng D8 — subagent_health surfaces rate-lease pressure to the operator.
   checks.push(await checkSubagentHealth(engine));
 
+  // v0.41.18.0 — batch_retry_health (cross-surface parity with buildChecks).
+  // Surfaces Supavisor circuit-breaker incidents over MCP so remote operators
+  // see the same signal local doctor surfaces.
+  checks.push(await checkBatchRetryHealth(engine));
+
   // v0.41.2.1 — embedding_env_override (cross-surface parity with
   // buildChecks). Surfaces when GBRAIN_EMBEDDING_* env vars disagree
   // with DB config; closes the silent-override class that caused the
@@ -1045,6 +1050,107 @@ export async function checkRerankerHealth(engine: BrainEngine): Promise<Check> {
       name: 'reranker_health',
       status: 'warn',
       message: `Could not check reranker audit: ${msg}`,
+    };
+  }
+}
+
+/**
+ * v0.41.18.0 batch_retry_health doctor check (codex H-9 thresholds).
+ *
+ * Surfaces sustained Supavisor circuit-breaker incidents from the
+ * engine-level batch retry wrap. Reads the last 24h of audit events from
+ * `~/.gbrain/audit/batch-retry-YYYY-Www.jsonl`.
+ *
+ * Threshold ladder (codex H-9 — avoid permanent noise from one historical blip):
+ *   ok    — zero exhausted events in 24h, OR <3 exhausted from a single site
+ *   warn  — >=3 exhausted from same site in 24h, OR >=5 cross-site
+ *   fail  — >=20 exhausted in 24h (sustained breaker; operator intervention)
+ *
+ * Also surfaces (codex H-9 corruption tolerance):
+ *   - corrupted_lines count when audit JSONL has malformed rows
+ *   - files_unreadable count for permission errors (NOT ENOENT which is normal)
+ *
+ * Also surfaces (codex M-10): runs resolveBulkRetryOpts(process.env) at
+ * startup so bad GBRAIN_BULK_* config fails at doctor time, not first-retry.
+ */
+export async function checkBatchRetryHealth(_engine: BrainEngine): Promise<Check> {
+  try {
+    // Codex M-10: surface bad env config at doctor time.
+    try {
+      const { resolveBulkRetryOpts } = await import('../core/retry.ts');
+      resolveBulkRetryOpts();
+    } catch (e) {
+      return {
+        name: 'batch_retry_health',
+        status: 'warn',
+        message: `GBRAIN_BULK_* env override invalid: ${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
+
+    const { readRecentBatchRetryEvents } = await import('../core/audit/batch-retry-audit.ts');
+    const result = readRecentBatchRetryEvents(24);
+
+    // Surface corruption / permission errors at warn so operators investigate.
+    if (result.files_unreadable > 0) {
+      return {
+        name: 'batch_retry_health',
+        status: 'warn',
+        message: `${result.files_unreadable} audit file(s) unreadable (permission / IO). Fix: check ~/.gbrain/audit/ (or $GBRAIN_AUDIT_DIR if set).`,
+      };
+    }
+
+    const exhausted = result.events.filter((e) => e.outcome === 'exhausted');
+    const successful = result.events.filter((e) => e.outcome === 'success');
+
+    if (exhausted.length === 0) {
+      const note = result.corrupted_lines > 0
+        ? ` (note: ${result.corrupted_lines} corrupt JSONL line(s) skipped)`
+        : '';
+      const recoveredNote = successful.length > 0
+        ? ` ${successful.length} transient retry(s) succeeded.`
+        : '';
+      return {
+        name: 'batch_retry_health',
+        status: 'ok',
+        message: `No exhausted batch retries in last 24h.${recoveredNote}${note}`,
+      };
+    }
+
+    // Group exhausted events by site for per-site threshold detection.
+    const bySite = new Map<string, number>();
+    for (const e of exhausted) bySite.set(e.site, (bySite.get(e.site) ?? 0) + 1);
+    const worstSite = [...bySite.entries()].sort((a, b) => b[1] - a[1])[0];
+
+    // codex H-9 fail threshold: >=20 in 24h = sustained breaker.
+    if (exhausted.length >= 20) {
+      return {
+        name: 'batch_retry_health',
+        status: 'fail',
+        message: `${exhausted.length} exhausted batch retries in last 24h (worst: ${worstSite[0]} = ${worstSite[1]}). Sustained circuit-breaker incident. Fix: check pooler status; consider raising GBRAIN_BULK_MAX_RETRIES or moving to direct-connection.`,
+      };
+    }
+
+    // warn thresholds: >=3 same-site OR >=5 cross-site.
+    if (worstSite[1] >= 3 || exhausted.length >= 5) {
+      return {
+        name: 'batch_retry_health',
+        status: 'warn',
+        message: `${exhausted.length} exhausted batch retries in last 24h (worst: ${worstSite[0]} = ${worstSite[1]}). Tune via GBRAIN_BULK_MAX_RETRIES / GBRAIN_BULK_RETRY_MAX_MS.`,
+      };
+    }
+
+    // Single-incident noise tolerance.
+    return {
+      name: 'batch_retry_health',
+      status: 'ok',
+      message: `${exhausted.length} exhausted batch retry(s) in last 24h (below per-site threshold of 3)`,
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      name: 'batch_retry_health',
+      status: 'warn',
+      message: `Could not check batch_retry audit: ${msg}`,
     };
   }
 }
@@ -5290,6 +5396,10 @@ export async function buildChecks(
     // v0.35.0.0+ reranker_health — read JSONL audit; warn on auth or volume.
     progress.heartbeat('reranker_health');
     checks.push(await checkRerankerHealth(engine));
+    // v0.41.18.0 batch_retry_health — Supavisor circuit-breaker incident
+    // surfacing via the batch-retry audit JSONL. Codex H-9 thresholds.
+    progress.heartbeat('batch_retry_health');
+    checks.push(await checkBatchRetryHealth(engine));
     // v0.40.4 graph_signals_coverage — global inbound-link density when
     // graph_signals is enabled in the active mode bundle.
     progress.heartbeat('graph_signals_coverage');

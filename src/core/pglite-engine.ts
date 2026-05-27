@@ -4,6 +4,7 @@ import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm';
 import type { Transaction } from '@electric-sql/pglite';
 import type {
   BrainEngine,
+  BatchOpts,
   LinkBatchInput, TimelineBatchInput,
   ReservedConnection,
   DreamVerdict, DreamVerdictInput,
@@ -16,6 +17,8 @@ import type {
   SourceRow,
 } from './engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
+import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, type BatchAuditSite } from './retry.ts';
+import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatchExhausted } from './audit/batch-retry-audit.ts';
 import { runMigrations } from './migrate.ts';
 import { PGLITE_SCHEMA_SQL, getPGLiteSchema } from './pglite-schema.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
@@ -1828,8 +1831,56 @@ export class PGLiteEngine implements BrainEngine {
     return result;
   }
 
+  // v0.41.18.0 — lazy-cached resolveBulkRetryOpts result + batch-retry helper.
+  // PGLite has no Postgres pooler so retries don't fire in production; the
+  // wrap is for engine-parity tests (T7) and a DI-friendly seam via the
+  // existing PGlite test infrastructure. Mirrors postgres-engine.ts.
+  private _bulkRetryOptsCache?: ReturnType<typeof resolveBulkRetryOpts>;
+  private getBulkRetryOpts(): ReturnType<typeof resolveBulkRetryOpts> {
+    if (!this._bulkRetryOptsCache) this._bulkRetryOptsCache = resolveBulkRetryOpts();
+    return this._bulkRetryOptsCache;
+  }
+
+  private async batchRetry<T>(
+    auditSite: BatchAuditSite,
+    signal: AbortSignal | undefined,
+    fn: () => Promise<T>,
+    batchSize: number,
+  ): Promise<T> {
+    const opts = this.getBulkRetryOpts();
+    let prevDelay = 0;
+    try {
+      return await withRetry(fn, {
+        maxRetries: opts.maxRetries,
+        delayMs: opts.delayMs,
+        delayMaxMs: opts.delayMaxMs,
+        jitter: BULK_RETRY_OPTS.jitter,
+        auditSite,
+        signal,
+        onRetry: (attempt, err) => {
+          const delay = computeNextDelay(attempt - 1, prevDelay, opts.delayMs, opts.delayMaxMs, BULK_RETRY_OPTS.jitter);
+          prevDelay = delay;
+          auditLogBatchRetry(auditSite, batchSize, attempt, delay, err);
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`[${auditSite}] connection blip, retrying (attempt ${attempt}/${opts.maxRetries}): ${msg}\n`);
+        },
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'RetryAbortError') throw err;
+      const { isRetryableConnError } = await import('./retry.ts');
+      if (isRetryableConnError(err)) {
+        auditLogBatchExhausted(auditSite, batchSize, opts.maxRetries + 1, err);
+      }
+      throw err;
+    }
+  }
+
   // Chunks
-  async upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string }): Promise<void> {
+  async upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string } & BatchOpts): Promise<void> {
+    return this.batchRetry(opts?.auditSite ?? 'upsertChunks', opts?.signal, () => this._upsertChunksOnce(slug, chunks, opts), chunks.length);
+  }
+
+  private async _upsertChunksOnce(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string }): Promise<void> {
     const sourceId = opts?.sourceId ?? 'default';
 
     // Source-scope the page-id lookup so duplicate slugs in different sources
@@ -2166,7 +2217,12 @@ export class PGLiteEngine implements BrainEngine {
     );
   }
 
-  async addLinksBatch(links: LinkBatchInput[]): Promise<number> {
+  async addLinksBatch(links: LinkBatchInput[], opts?: BatchOpts): Promise<number> {
+    if (links.length === 0) return 0;
+    return this.batchRetry(opts?.auditSite ?? 'addLinksBatch', opts?.signal, () => this._addLinksBatchOnce(links), links.length);
+  }
+
+  private async _addLinksBatchOnce(links: LinkBatchInput[]): Promise<number> {
     if (links.length === 0) return 0;
     // unnest() pattern: 10 array-typed bound parameters regardless of batch
     // size. Same shape as PostgresEngine (v0.18). Avoids the 65535-parameter
@@ -2785,7 +2841,12 @@ export class PGLiteEngine implements BrainEngine {
     );
   }
 
-  async addTimelineEntriesBatch(entries: TimelineBatchInput[]): Promise<number> {
+  async addTimelineEntriesBatch(entries: TimelineBatchInput[], opts?: BatchOpts): Promise<number> {
+    if (entries.length === 0) return 0;
+    return this.batchRetry(opts?.auditSite ?? 'addTimelineEntriesBatch', opts?.signal, () => this._addTimelineEntriesBatchOnce(entries), entries.length);
+  }
+
+  private async _addTimelineEntriesBatchOnce(entries: TimelineBatchInput[]): Promise<number> {
     if (entries.length === 0) return 0;
     const slugs = entries.map(e => e.slug);
     const dates = entries.map(e => e.date);

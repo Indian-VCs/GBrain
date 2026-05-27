@@ -2,6 +2,150 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.41.19.0] - 2026-05-26
+
+**Your dream cycle stops silently losing wiki links.**
+
+If you sync against a Supabase brain, the nightly extract phase used to
+silently lose ~3,000 wiki links and timeline entries on every run. You
+didn't see an error — you just had fewer connections than you wrote.
+Backlinks that should have shown up didn't. The graph quietly degraded
+day after day. v0.41.19.0 stops it cold.
+
+The root cause: Supabase's pooler periodically drops connections, and
+when that happens it takes 5-10 seconds to recover. Old gbrain retried
+once after 500ms, which was almost always still inside the broken
+window. The new shape retries up to 3 times with 1s → ~3s → ~8s waits,
+which covers the full Supabase recovery window. Total worst-case wait
+is ~12 seconds before the call gives up, which is the right trade
+against silent data loss.
+
+**How to turn it on:** Nothing to do. `gbrain upgrade` is all you need.
+PGLite users pay zero cost because PGLite has no pooler. Supabase users
+get the fix everywhere — `gbrain extract`, `gbrain sync`,
+`gbrain reindex`, and even the MCP `put_page` path that every agent
+hits on every write.
+
+**How to see if it ever fires:** `gbrain doctor` learned a new
+`batch_retry_health` check. On a healthy brain it reads `ok`. If
+Supavisor ever burns through retries (the case where rows actually got
+lost), it warns with the exact site that failed and a paste-ready fix.
+History lives in `~/.gbrain/audit/batch-retry-YYYY-Www.jsonl` (auto-
+pruned after 30 days during the dream cycle's purge phase).
+
+**How to tune it if you need to:** the defaults are right for Supabase
+Supavisor session-mode. If you're on an unusually slow pooler or
+debugging:
+
+```bash
+export GBRAIN_BULK_MAX_RETRIES=5       # int >= 0; 0 = disable retries
+export GBRAIN_BULK_RETRY_BASE_MS=2000  # int > 0; base delay
+export GBRAIN_BULK_RETRY_MAX_MS=15000  # int >= base; cap
+```
+
+Bad values surface at `gbrain doctor` startup with a paste-ready fix.
+Not at first-retry mid-cycle, where you'd never see them.
+
+**What changed for an engineer reading the code:** retry is now a
+data-primitive contract. `engine.addLinksBatch`, `engine.addTimelineEntriesBatch`,
+and `engine.upsertChunks` self-retry inside the engine implementation.
+Callers don't wrap. Future callers don't need to wrap. A CI lint
+(`scripts/check-no-double-retry.sh`) fails the build if anyone adds an
+outer `withRetry` around an engine batch method (preventing 3×3=9
+retry amplification that would worsen circuit-breaker incidents).
+
+**What we caught before merge:** the first plan wrapped retry at every
+call site (11 sites). Eng review pivoted to engine-level wrap (3 sites,
+every caller benefits). Codex independent review caught that the initial
+backoff math (500/1000/2000 = 3.5s total) was still underpowered for
+Supavisor's recovery window, that `'full'` jitter could produce
+near-zero retries that re-hit the still-recovering breaker, and that
+the retry primitive needed `AbortSignal` support so deploys aren't
+blocked waiting for sleeping retries. All three landed in this release.
+
+Co-Authored-By: garrytan-agents (PR #1523, original extract.ts fix
+absorbed into the cathedral wave)
+
+### Itemized changes
+
+- **`src/core/retry.ts` (new):** canonical `withRetry<T>(fn, opts)`
+  primitive + `BULK_RETRY_OPTS` (`{maxRetries:3, delayMs:1000,
+  delayMaxMs:10000, jitter:'decorrelated'}`) + `BATCH_AUDIT_SITES`
+  typed const + `resolveBulkRetryOpts(env)` + `abortableSleep(ms, signal?)`
+  + `RetryAbortError` + `computeNextDelay()`. Decorrelated jitter
+  (AWS-style: `uniform(base, prevDelay*3)` capped) prevents the
+  thundering-herd-against-recovering-breaker class.
+- **Engine-level retry:** `postgres-engine.ts` + `pglite-engine.ts`
+  `addLinksBatch` / `addTimelineEntriesBatch` / `upsertChunks` self-retry
+  via a shared `batchRetry()` helper that composes withRetry + audit
+  emission. Callers pass `{auditSite}` kwarg for attribution; signal
+  flows from `MinionWorker.shutdownAbort` so SIGTERM aborts retries.
+- **`src/core/audit/batch-retry-audit.ts` (new):** ISO-week-rotated JSONL
+  at `~/.gbrain/audit/batch-retry-YYYY-Www.jsonl` built on the
+  `audit-writer.ts` cathedral. `logBatchRetry` (success path) +
+  `logBatchExhausted` (rows lost). 24h read window for doctor (codex
+  H-9: short window = less noise from historical blips). `pruneOldBatchRetryAuditFiles(30)`
+  hooked into the cycle's purge phase. Privacy posture: never logs
+  slugs / page IDs / content (mirrors `shell-audit.ts`).
+- **`doctor.ts:checkBatchRetryHealth`:** new check wired into both
+  local `runDoctor` AND `doctorReportRemote` (thin-client). Thresholds:
+  ok (zero in 24h OR <3 same-site), warn (>=3 same-site OR >=5
+  cross-site), fail (>=20 sustained breaker). Surfaces bad `GBRAIN_BULK_*`
+  env at doctor startup so misconfig doesn't wait for first-retry.
+  Corrupt-JSONL tolerant.
+- **`scripts/check-no-double-retry.sh` + `scripts/check-batch-audit-site.sh`:**
+  CI lint guards wired into `bun run verify`. Prevents migration-ordering
+  hazards (Eng-D6) and audit-site typo drift (codex H-7) at build time.
+- **`backfill-base.ts` cleanup:** inline `setTimeout(r, 1000)` calls
+  swap for the shared `abortableSleep`. Bespoke retry orchestrator
+  stays (statement_timeout halving is genuinely orthogonal to
+  connection retry); sleep primitive unified.
+- **PR #1523 absorbed verbatim:** @garrytan-agents' 5 new test cases
+  move to `test/core/retry.test.ts` with assertions adjusted for the
+  v0.41.18 BULK_RETRY_OPTS defaults. Co-Authored-By trailer on the
+  merge commit.
+- **Tests:** +37 cases in `test/core/retry.test.ts` (jitter math, abort
+  semantics, env-override boundaries, typed audit-site validation) +
+  12 in `test/audit/batch-retry-audit.test.ts` + 10 in
+  `test/doctor-batch-retry.test.ts` + 5 in
+  `test/core/retry-stress.slow.test.ts` (100 batches × 30% blip rate,
+  asserts zero row loss with BULK_RETRY_OPTS).
+- **Migration ordering safety:** T2 (core/retry.ts) + T3 (engine wrap)
+  + T4 (caller unwrap) land in one commit. The CI lint guard prevents
+  any future revert from leaving the codebase in the 3×3=9-retry state.
+
+### Codex review (independent challenge)
+
+23 findings on the v2 plan. 10 critical/high absorbed into the shipped
+build: decorrelated jitter (C-2), 12s backoff window (C-1),
+AbortSignal threading (H-5), inline commit-ambiguity proof per primitive
+(C-4), backfill-base sleep unification (H-6), typed audit-site enum
+(H-7), actual 30-day audit pruning (H-8), doctor 24h window with
+per-site thresholds (H-9), env validation at doctor startup (M-10),
+per-instance test seam via WeakMap (M-11), `GBRAIN_BULK_MAX_RETRIES=0`
+debug-disable (M-12).
+
+## To take advantage of v0.41.19.0
+
+`gbrain upgrade` does it automatically. No schema migration needed.
+
+1. **Run the orchestrator manually if `gbrain upgrade`'s post-upgrade
+   hook didn't kick in:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Verify the new health check is alive:**
+   ```bash
+   gbrain doctor --json | jq '.checks[] | select(.name == "batch_retry_health")'
+   ```
+3. **(Optional) Watch the audit file as the next dream cycle runs:**
+   ```bash
+   tail -f ~/.gbrain/audit/batch-retry-*.jsonl
+   ```
+4. **If anything looks wrong,** file an issue at
+   https://github.com/garrytan/gbrain/issues with `gbrain doctor` output
+   and the contents of `~/.gbrain/audit/batch-retry-*.jsonl`.
+
 ## [0.41.18.0] - 2026-05-26
 
 **You can now run one command and have gbrain tell you exactly what's
@@ -117,6 +261,7 @@ Note: schema migrations originally numbered v98/v99/v100 were renumbered
 to v101/v102/v103 post-merge because master claimed v98 (sync lock
 refresh column from v0.41.15.0) and v99 (conversation parser cache from
 v0.41.16.0). Migration content unchanged across the renumber.
+
 ## [0.41.17.0] - 2026-05-26
 
 **You can now run `extract-conversation-facts`, `extract`,

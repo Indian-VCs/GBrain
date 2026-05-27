@@ -1126,6 +1126,16 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
     } catch {
       // Non-fatal.
     }
+    // v0.41.18.0 codex H-8 — actual 30-day pruning of batch-retry audit JSONL.
+    // The pre-v0.41.18 plan promised this "by convention"; this is the real
+    // implementation. Never throws — best-effort GC.
+    let purgedBatchRetryAuditFiles = 0;
+    try {
+      const { pruneOldBatchRetryAuditFiles } = await import('./audit/batch-retry-audit.ts');
+      purgedBatchRetryAuditFiles = pruneOldBatchRetryAuditFiles(30).removed;
+    } catch {
+      // Non-fatal.
+    }
     return {
       phase: 'purge',
       status: 'ok',
@@ -1133,7 +1143,8 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
       summary:
         `purged ${purgedSources.length} source(s), ${purgedPages.count} page(s), ` +
         `${purgedClones.count} orphan clone temp dir(s), ${purgedCheckpoints} stale op_checkpoint(s), ` +
-        `and ${purgedBrainstormCheckpoints} stale brainstorm checkpoint(s)`,
+        `${purgedBrainstormCheckpoints} stale brainstorm checkpoint(s), ` +
+        `and ${purgedBatchRetryAuditFiles} stale batch-retry audit file(s)`,
       details: {
         purged_sources_count: purgedSources.length,
         purged_pages_count: purgedPages.count,
@@ -1143,6 +1154,7 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
         purged_page_slugs: purgedPages.slugs,
         purged_checkpoints_count: purgedCheckpoints,
         purged_brainstorm_checkpoints_count: purgedBrainstormCheckpoints,
+        purged_batch_retry_audit_files_count: purgedBatchRetryAuditFiles,
       },
     };
   } catch (e) {

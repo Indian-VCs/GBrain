@@ -291,6 +291,28 @@ for the honest scope notes (extract + embed phases run to completion;
 30-min rollout window for `--max-age` post-migration v98; full-sync
 triggers deferred to v0.42+).
 
+**Dream cycle silently losing wiki links on Supabase?** v0.41.19.0 fixes
+the bug class structurally. The engine now self-retries every bulk batch
+write (`addLinksBatch` / `addTimelineEntriesBatch` / `upsertChunks`) on
+Supavisor pooler blips, with a 12s worst-case wait that covers the full
+5-10s circuit-breaker recovery window. `gbrain doctor` surfaces incidents
+via the new `batch_retry_health` check (reads the last 24h of
+`~/.gbrain/audit/batch-retry-YYYY-Www.jsonl`). To tune for an unusually
+slow pooler:
+
+```bash
+# Defaults: 3 retries, base 1s, max 10s, decorrelated jitter.
+# Override per operator without a release:
+export GBRAIN_BULK_MAX_RETRIES=5       # int >= 0; 0 disables retries
+export GBRAIN_BULK_RETRY_BASE_MS=2000  # int > 0
+export GBRAIN_BULK_RETRY_MAX_MS=15000  # int >= base
+```
+
+Bad values surface at `gbrain doctor` startup with a paste-ready fix
+(not at first-retry mid-cycle). PGLite-only installs pay zero cost — the
+retry wrap is engine-level, but PGLite has no pooler so retries never
+fire in practice.
+
 ## Docs
 
 - [`docs/INSTALL.md`](docs/INSTALL.md) — every install path, end to end

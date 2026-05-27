@@ -41,7 +41,15 @@ import {
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import { pathToSlug, pruneDir, isSyncable } from '../core/sync.ts';
-import { isRetryableConnError } from '../core/retry-matcher.ts';
+// v0.41.18.0: withRetry + isRetryableConnError + WithRetryOpts moved to
+// src/core/retry.ts as the canonical primitive. Engine methods
+// (addLinksBatch/addTimelineEntriesBatch/upsertChunks) now self-retry via
+// engine-level wrap; call sites here will be unwrapped in T4. Re-exported
+// from this module for now to preserve any out-of-tree callers' import paths;
+// the next major version may drop the re-export.
+import { withRetry, isRetryableConnError } from '../core/retry.ts';
+export { withRetry };
+export type { WithRetryOpts } from '../core/retry.ts';
 import { buildGazetteer, findMentionedEntities } from '../core/by-mention.ts';
 // v0.41.15.0 (T7, D9): --workers N for the fs-walk inner loops via the
 // shared sliding-pool helper + PGLite-clamp wrapper.
@@ -55,33 +63,9 @@ import { parseWorkers, resolveWorkersWithClamp } from '../core/sync-concurrency.
 // small (a malformed row aborts at most 100, not thousands).
 const BATCH_SIZE = 100;
 
-// v0.41.2.1 — batch-flush retry primitive (closes PR #1416's ~30% batch-loss
-// bug). PgBouncer transaction-mode poolers recycle backend connections between
-// queries; the next query through a stale handle throws a retryable connection
-// error. Single 500ms-delay retry catches the recycle without amplifying real
-// outages (second failure propagates). Non-retryable errors (constraint
-// violations, etc.) propagate immediately so log-and-continue semantics are
-// preserved.
-//
-// Pure primitive: callers compose `onRetry` for stderr UI; retry classification
-// uses the canonical `isRetryableConnError` from src/core/retry-matcher.ts so
-// PgBouncer/auth-race/tcp-reset shapes don't drift across the codebase.
-
-export interface WithRetryOpts {
-  onRetry?: (attempt: number, err: unknown) => void;
-  delayMs?: number; // default 500
-}
-
-export async function withRetry<T>(fn: () => Promise<T>, opts: WithRetryOpts = {}): Promise<T> {
-  try {
-    return await fn();
-  } catch (firstErr) {
-    if (!isRetryableConnError(firstErr)) throw firstErr;
-    opts.onRetry?.(1, firstErr);
-    await new Promise((r) => setTimeout(r, opts.delayMs ?? 500));
-    return await fn(); // single retry — second failure propagates
-  }
-}
+// isRetryableConnError reference retained for any inline classification at
+// call sites. Engine-level retry uses the same predicate via core/retry.ts.
+void isRetryableConnError;
 
 export function logBatchRetry(
   label: string,
@@ -743,10 +727,10 @@ async function extractForSlugs(
     const snapshot = linkBatch.slice();
     linkBatch.length = 0;
     try {
-      linksCreated += await withRetry(
-        () => engine.addLinksBatch(snapshot), // gbrain-allow-direct-insert: gbrain extract command — canonical link reconciliation from markdown body
-        { onRetry: (_a, err) => logBatchRetry('extract.links_inc', snapshot.length, err, jsonMode) },
-      );
+      // v0.41.18.0: engine self-retries on Supavisor blip. auditSite routes
+      // the audit JSONL emission. Per-snapshot try/catch preserves the
+      // log-and-continue contract for exhausted retries.
+      linksCreated += await engine.addLinksBatch(snapshot, { auditSite: 'extract.links_inc' }); // gbrain-allow-direct-insert: gbrain extract command — canonical link reconciliation from markdown body
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (!jsonMode) console.error(`  link batch error (${snapshot.length} rows lost): ${msg}`);
@@ -758,10 +742,7 @@ async function extractForSlugs(
     const snapshot = timelineBatch.slice();
     timelineBatch.length = 0;
     try {
-      timelineCreated += await withRetry(
-        () => engine.addTimelineEntriesBatch(snapshot),
-        { onRetry: (_a, err) => logBatchRetry('extract.timeline_inc', snapshot.length, err, jsonMode) },
-      );
+      timelineCreated += await engine.addTimelineEntriesBatch(snapshot, { auditSite: 'extract.timeline_inc' });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (!jsonMode) console.error(`  timeline batch error (${snapshot.length} rows lost): ${msg}`);
@@ -855,10 +836,7 @@ async function extractLinksFromDir(
     const snapshot = batch.slice();
     batch.length = 0;
     try {
-      created += await withRetry(
-        () => engine.addLinksBatch(snapshot), // gbrain-allow-direct-insert: gbrain extract command — canonical link reconciliation from markdown body
-        { onRetry: (_a, err) => logBatchRetry('extract.links_fs', snapshot.length, err, jsonMode) },
-      );
+      created += await engine.addLinksBatch(snapshot, { auditSite: 'extract.links_fs' }); // gbrain-allow-direct-insert: gbrain extract command — canonical link reconciliation from markdown body
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (jsonMode) {
@@ -923,10 +901,7 @@ async function extractTimelineFromDir(
     const snapshot = batch.slice();
     batch.length = 0;
     try {
-      created += await withRetry(
-        () => engine.addTimelineEntriesBatch(snapshot),
-        { onRetry: (_a, err) => logBatchRetry('extract.timeline_fs', snapshot.length, err, jsonMode) },
-      );
+      created += await engine.addTimelineEntriesBatch(snapshot, { auditSite: 'extract.timeline_fs' });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (jsonMode) {
@@ -1099,10 +1074,7 @@ async function extractLinksFromDB(
     const snapshot = batch.slice();
     batch.length = 0;
     try {
-      created += await withRetry(
-        () => engine.addLinksBatch(snapshot), // gbrain-allow-direct-insert: gbrain extract command — canonical link reconciliation from markdown body
-        { onRetry: (_a, err) => logBatchRetry('extract.links_db', snapshot.length, err, jsonMode) },
-      );
+      created += await engine.addLinksBatch(snapshot, { auditSite: 'extract.links_db' }); // gbrain-allow-direct-insert: gbrain extract command — canonical link reconciliation from markdown body
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (jsonMode) {
@@ -1256,10 +1228,7 @@ async function extractTimelineFromDB(
     const snapshot = batch.slice();
     batch.length = 0;
     try {
-      created += await withRetry(
-        () => engine.addTimelineEntriesBatch(snapshot),
-        { onRetry: (_a, err) => logBatchRetry('extract.timeline_db', snapshot.length, err, jsonMode) },
-      );
+      created += await engine.addTimelineEntriesBatch(snapshot, { auditSite: 'extract.timeline_db' });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (jsonMode) {
@@ -1369,7 +1338,7 @@ async function extractMentionsFromDb(
   async function flush() {
     if (batch.length === 0) return;
     try {
-      created += await engine.addLinksBatch(batch); // gbrain-allow-direct-insert: gbrain extract --by-mention — canonical auto-link write from body-text mention scan
+      created += await engine.addLinksBatch(batch, { auditSite: 'extract.by_mention' }); // gbrain-allow-direct-insert: gbrain extract --by-mention — canonical auto-link write from body-text mention scan
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (jsonMode) {

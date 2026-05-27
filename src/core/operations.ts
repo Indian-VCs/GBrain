@@ -807,7 +807,10 @@ const put_page: Operation = {
               summary: e.summary,
               detail: e.detail || '',
             }));
-            const created = await ctx.engine.addTimelineEntriesBatch(batch);
+            // v0.41.18.0: engine self-retries on Supavisor circuit-breaker
+            // recovery. auditSite label routes the audit JSONL emission so
+            // operators can attribute losses to the agent-write path.
+            const created = await ctx.engine.addTimelineEntriesBatch(batch, { auditSite: 'mcp.put_page.autolink' });
             autoTimeline = { created };
           } else {
             autoTimeline = { created: 0 };
