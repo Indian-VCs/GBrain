@@ -1,5 +1,32 @@
 # TODOS
 
+## v0.41.30.0 retrieval-cathedral follow-ups (v0.42+)
+
+Deferred from the v0.41.30.0 wave (codex adversarial P1/P2 — documented tradeoffs,
+not blockers; the P0 source-isolation issues were fixed in-wave).
+
+- [ ] **P1 — Calibrate the `evidence` classifier.** `high_vector_match` is assigned
+  from `base_score >= 0.85`, but `base_score` is the pre-boost RRF/keyword/title/alias
+  pipeline score, not a pure cosine. A generic high-scoring page can read as
+  `create_safety='exists'`. Add a true vector-cosine signal (or a `keyword_exact`
+  exact-token check) so the evidence labels are grounded, not inferred from the blend.
+  File: `src/core/search/evidence.ts`. **Why:** the evidence contract is what stops
+  the duplicate-page class; mislabeled evidence weakens it.
+
+- [ ] **P1 — Page-bounded vector pagination.** `searchVector` innerLimit is
+  `offset + max(limit*5, 100)` counted BEFORE `DISTINCT ON`, so on a dense page one
+  page can consume the candidate budget and a deep `OFFSET` can underfill even when
+  more pages exist. Restructure to a two-stage pull (top-N chunks → pool → re-expand)
+  or raise innerLimit adaptively for deep offsets. Files: both engines' `searchVector`.
+  **Why:** deep search pagination on big brains can return short pages.
+
+- [ ] **P2 — Telemetry rolling-deploy gap.** Pre-v109 (mid rolling deploy), rank-1
+  telemetry INSERTs reference missing columns and the write is swallowed, so a window
+  of telemetry is silently lost and `search stats` reads empty on old tables. Either
+  feature-detect the columns before writing the extended INSERT, or accept the gap
+  (documented). File: `src/core/search/telemetry.ts`. **Why:** brief observability
+  blind spot during upgrades.
+
 ## v0.41.29.0 orphan source-scoping follow-ups (v0.42+)
 
 Filed from the v0.41.29.0 wave (bold-name-no-time pattern + orphan_ratio
