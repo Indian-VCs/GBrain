@@ -671,6 +671,20 @@ export interface SearchResult {
    * decision keys off (T4).
    */
   alias_hit?: boolean;
+  /**
+   * T4 — the strongest signal that surfaced this page (alias_hit >
+   * exact_title_match > high_vector_match > keyword_exact > weak_semantic).
+   * Computed by classifyEvidence at the end of the hybrid pipeline.
+   */
+  evidence?: import('./search/evidence.ts').Evidence;
+  /**
+   * T4 — derived "is this page already in the brain?" hint. The agent's
+   * don't-write-a-duplicate decision keys off THIS, not a raw score:
+   * 'exists' = strong (don't duplicate), 'probable' = prefer update,
+   * 'unknown' = look closer. This is the contract that prevents the
+   * incident's duplicate-stub class.
+   */
+  create_safety?: import('./search/evidence.ts').CreateSafety;
 }
 
 /**

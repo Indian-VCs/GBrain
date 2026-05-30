@@ -20,6 +20,7 @@ import { applyReranker } from './rerank.ts';
 import { autoDetectDetail, classifyQuery, isAmbiguousModalityQuery } from './query-intent.ts';
 import { isTitlePhraseMatch } from './title-match.ts';
 import { normalizeAlias } from './alias-normalize.ts';
+import { stampEvidence } from './evidence.ts';
 import { expandAnchors, hydrateChunks } from './two-pass.ts';
 import { enforceTokenBudget } from './token-budget.ts';
 import { recordSearchTelemetry } from './telemetry.ts';
@@ -586,6 +587,14 @@ export async function applyAliasHop(
 
 export interface HybridSearchOpts extends SearchOpts {
   expansion?: boolean;
+  /**
+   * T4/D5 — per-call search-mode selector (one of SEARCH_MODES). Selects the
+   * whole mode bundle for this call, overriding the server-configured mode.
+   * The op layer passes this ONLY for trusted/local callers (ctx.remote ===
+   * false); remote callers leave it undefined so they can't escalate to the
+   * costly tokenmax bundle. Unknown values fall back to the default bundle.
+   */
+  mode?: string;
   expandFn?: (query: string) => Promise<string[]>;
   /** Override default RRF K constant (default: 60). Lower values boost top-ranked results more. */
   rrfK?: number;
@@ -623,7 +632,11 @@ export async function hybridSearch(
   const { loadSearchModeConfig, resolveSearchMode } = await import('./mode.ts');
   const modeInput = await loadSearchModeConfig(engine);
   const resolvedMode = resolveSearchMode({
-    mode: modeInput.mode,
+    // T4/D5 — per-call mode selector (e.g. `--mode tokenmax`). The op layer
+    // only passes this for trusted/local callers; remote callers leave it
+    // undefined and fall through to the server-configured mode (no cost
+    // escalation). Unknown values fall back to the default in resolveSearchMode.
+    mode: opts?.mode ?? modeInput.mode,
     overrides: modeInput.overrides,
     perCall: {
       intentWeighting: opts?.intentWeighting,
@@ -813,7 +826,14 @@ export async function hybridSearch(
       await runPostFusionStages(engine, keywordResults, postFusionOpts);
       keywordResults.sort((a, b) => b.score - a.score);
     }
-    const noEmbedSliced = dedupResults(keywordResults).slice(offset, offset + limit);
+    // T3/T4 — alias hop + evidence stamp even without an embedding provider
+    // (the named-thing fix is most valuable exactly when vector is unavailable).
+    const noEmbedHopped = await applyAliasHop(engine, dedupResults(keywordResults), query, {
+      sourceId: opts?.sourceId,
+      sourceIds: opts?.sourceIds,
+    });
+    stampEvidence(noEmbedHopped);
+    const noEmbedSliced = noEmbedHopped.slice(offset, offset + limit);
     // v0.32.3 search-lite: budget enforcement on the no-embedding-provider path.
     const { results: noEmbedBudgeted, meta: noEmbedBudgetMeta } = enforceTokenBudget(noEmbedSliced, resolvedMode.tokenBudget);
     lastResultsCount = noEmbedBudgeted.length;
@@ -1023,7 +1043,12 @@ export async function hybridSearch(
       await runPostFusionStages(engine, keywordResults, postFusionOpts);
       keywordResults.sort((a, b) => b.score - a.score);
     }
-    const kwSliced = dedupResults(keywordResults).slice(offset, offset + limit);
+    const kwHopped = await applyAliasHop(engine, dedupResults(keywordResults), query, {
+      sourceId: opts?.sourceId,
+      sourceIds: opts?.sourceIds,
+    });
+    stampEvidence(kwHopped);
+    const kwSliced = kwHopped.slice(offset, offset + limit);
     // v0.32.3 search-lite: budget enforcement on the keyword-fallback path too.
     const { results: kwBudgeted, meta: kwBudgetMeta } = enforceTokenBudget(kwSliced, resolvedMode.tokenBudget);
     lastResultsCount = kwBudgeted.length;
@@ -1184,6 +1209,9 @@ export async function hybridSearch(
     sourceIds: opts?.sourceIds,
   });
 
+  // T4 — stamp evidence + create_safety so the agent's don't-duplicate
+  // decision keys off WHY a page matched, not a raw blended score.
+  stampEvidence(aliasHopped);
   const sliced = aliasHopped.slice(offset, offset + limit);
   // v0.32.3 search-lite: budget enforcement at the main return path.
   // hybridSearchCached used to be the only place this fired; now bare
@@ -1238,7 +1266,10 @@ export async function hybridSearchCached(
   const { loadSearchModeConfig, resolveSearchMode, knobsHash } = await import('./mode.ts');
   const modeInputForCache = await loadSearchModeConfig(engine);
   const resolvedForCache = resolveSearchMode({
-    mode: modeInputForCache.mode,
+    // T4/D5 — per-call mode folds into the cache key (resolved_mode is part
+    // of knobsHash) so a per-call `--mode tokenmax` read can't be served a
+    // server-default-mode cache row.
+    mode: opts?.mode ?? modeInputForCache.mode,
     overrides: modeInputForCache.overrides,
     perCall: {
       cache_enabled: opts?.useCache,
