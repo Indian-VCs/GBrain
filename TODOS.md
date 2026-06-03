@@ -1,5 +1,66 @@
 # TODOS
 
+## v0.42.15.0 module-singleton ownership follow-ups (v0.42+)
+
+Filed from the v0.42.15.0 wave (#1404/#1471/#1619 — the dream-cycle
+"connect() has not been called" class, fixed via `_ownsModuleSingleton`).
+Surfaced by the Codex outside-voice review (finding #4) and deliberately scoped
+OUT — pre-existing, and the ownership fix *reduces* its window. See plan +
+GSTACK REVIEW REPORT at
+`~/.claude/plans/system-instruction-you-are-working-lazy-allen.md`.
+
+- [ ] **P3 — Stale `ConnectionManager` read-pool after an owner `reconnect()`.**
+  A module-style borrower engine caches the singleton at connect time via
+  `connectionManager.setReadPool(db.getConnection())` (`postgres-engine.ts:~208`).
+  When the OWNER engine calls `reconnect()` (the batchRetry path), it tears down
+  the old module singleton and builds a fresh one — but the borrower's
+  `connectionManager` still holds the OLD (ended) pool. The borrower's normal
+  query path is fine (`this.sql` → `db.getConnection()` resolves the NEW
+  singleton), so this is invisible on read/write. The edge is
+  `initSchema()`, which routes DDL through `connectionManager.ddl()`
+  (`postgres-engine.ts:~253`) — a borrower running initSchema after an owner
+  reconnect would hit the dead pool. Pre-existing (not introduced by #1471), and
+  the ownership fix makes owner reconnects *rarer* (the singleton no longer gets
+  nulled by borrowers, so reconnect only fires on genuine transient drops), which
+  shrinks the window. Real fix: refresh a borrower's `connectionManager` read
+  pool lazily from `db.getConnection()` on use, or have `db.connect()`/reconnect
+  publish a generation counter the manager checks. Defer until a borrower is
+  observed running `initSchema()` mid-process (no current caller does).
+
+- [ ] **P2 — Ownership state can desync from the shared singleton under
+  CONCURRENT module connect/reconnect.** Both adversarial reviewers (Codex +
+  Claude) independently flagged this. `_ownsModuleSingleton` is per-engine state
+  about a shared (module-level) resource, so it can migrate: if a borrower calls
+  `connect()`/`reconnect()` during the window when an owner's `reconnect()` has
+  nulled `sql` (`db.ts` snapshot-early-null) but not yet rebuilt it, the borrower
+  creates the new singleton and becomes owner; the owner re-connects as a
+  borrower; the short-lived borrower's later `disconnect()` then closes the live
+  pool the demoted owner still uses — the original bug, in reverse. ALSO: the
+  audit-import + `connectionManager.disconnect()` awaits in `PostgresEngine.disconnect()`
+  and the publish-before-`SELECT 1` window in `db.connect()` let a concurrent
+  connect join a dying/unverified pool. NOT REACHABLE in current gbrain — cycle
+  phases are sequential on one awaited engine, borrowers are nested within a
+  phase, the parallel-sync worker pool uses INSTANCE engines (not the singleton),
+  and facts/last-retrieved background writes reuse the owner engine (no second
+  module engine). The ownership fix is correct for every reachable path and is
+  fully tested. The structural fix (which removes the unenforced "no concurrent
+  module connect" invariant) is the refcount/lease-in-db.ts approach Codex argued
+  in the plan review: keep the lifecycle state WITH the shared resource so it
+  can't desync per-engine, bounded against CLI-hang by a top-level forced
+  cleanup. Do this BEFORE introducing any concurrent module-engine connect path.
+
+- [ ] **P3 — `dream` + CLI_ONLY fall-through paths don't drain the facts /
+  last-retrieved queues before the owner disconnect.** The op-dispatch path
+  (`cli.ts:~282-314`) drains `getFactsQueue().drainPending()` +
+  `awaitPendingLastRetrievedWrites()` before `engine.disconnect()`; the `dream`
+  owner-disconnect (`cli.ts:~1164`) and the fall-through owner-disconnect
+  (`cli.ts:~1785`) do not. If the dream cycle ever enqueues a facts:absorb /
+  last-retrieved write that's still in flight at disconnect, the owner nulls the
+  singleton and the write throws "No database connection". Pre-existing (not
+  introduced by the #1471 ownership fix), surfaced by the Claude adversarial
+  review (F5). Fix: hoist the same drain-before-disconnect block the op-dispatch
+  path uses into a shared helper and call it on all three owner-disconnect sites.
+
 ## v0.42.7.0 extract-in-default-loop follow-ups (v0.42+)
 
 Filed from the v0.42.2.0 wave (#1696 link/timeline extraction freshness

@@ -2,6 +2,54 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.15.0] - 2026-06-02
+
+**Your nightly `gbrain dream` stops silently losing every database phase.** If you run gbrain on Postgres (local or Supabase), the dream cycle has been quietly failing: the `lint` and `backlinks` phases work, then `sync`, `synthesize`, `embed`, and the rest all blow up with `No database connection: connect() has not been called`. The extract phase reports "created 0 links" while actually dropping every row. Run the same phases one at a time in separate commands and they all work — only the full cycle breaks. The result: your brain quietly stops staying up to date, and the cycle leaves a stuck lock behind.
+
+The cause turned out to be a single sentence of logic. The dream cycle opens one long-lived database connection and reuses it for the whole run. But along the way, small helper steps (the lint config probe, doctor checks) briefly open their own connection handle. When those short-lived helpers finished and closed *their* handle, they were actually closing the *shared* connection the rest of the cycle still needed. Every later phase then found the connection gone.
+
+This release teaches gbrain who actually owns the shared connection. Only the engine that opened it is allowed to close it; the short-lived helpers leave it alone. The fix lands automatically:
+
+```
+gbrain upgrade
+gbrain dream --dir <your-brain>   # every DB phase now reports ✓, lock releases cleanly
+```
+
+Nothing to configure. If your dream cycle was the broken kind, it just starts working.
+
+### Under the hood
+
+The shared connection is the module-level `sql` singleton in `src/core/db.ts`. It was only ever nulled by `db.disconnect()` — postgres.js auto-reconnects its own internal pool and never touches our reference — so the singleton going null mid-cycle was always a "borrower" engine's disconnect cascading into `db.disconnect()`, never an idle-pooler drop. `PostgresEngine.disconnect()` called `db.disconnect()` for any `_connectionStyle === 'module'` engine with no check for whether that engine actually created the singleton.
+
+The fix adds an ownership token. `db.connect()` now returns whether THIS call created the singleton — decided atomically inside `connect()`, since there is no `await` between its `if (sql)` null-check and the synchronous `sql = postgres(...)` assignment, so two connects can't both claim creation. `PostgresEngine` stores that as `_ownsModuleSingleton` and only calls `db.disconnect()` when it owns the connection; borrowers clear their own marker and leave the shared pool alone. Two adjacent hardenings landed in the same pass: `db.disconnect()` now snapshots and nulls `sql` *before* awaiting `end()` (so a concurrent connect can't join a pool that's already closing), and `reconnect()` uses a shared in-flight promise so concurrent callers await the same reconnect instead of racing a half-rebuilt pool.
+
+Earlier partial fixes addressed symptoms: v0.41.27.0's retry-with-reconnect rescued the batch-write phases (extract) but not `sync`/`synthesize`, which don't go through the retry path; v0.42.5.0 stopped the lint phase from being a borrower but left the structural hole open for every other helper. This closes the hole at the source.
+
+### To take advantage of v0.42.15.0
+
+`gbrain upgrade` applies this automatically — there are no migrations or config to set. To confirm it took:
+
+1. Run a cycle and watch the phases:
+   ```bash
+   gbrain dream --dir <your-brain> --dry-run
+   ```
+   Every DB phase should report `✓`, not `✗ ... connect() has not been called`.
+2. Confirm no stuck lock:
+   ```bash
+   psql <your-db> -c "SELECT count(*) FROM gbrain_cycle_locks;"   # expect 0
+   ```
+3. If a DB phase still fails, please file an issue at https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor` and the cycle's stderr.
+
+### Itemized changes
+
+- **`gbrain dream` on Postgres completes every phase.** The module-singleton ownership fix (`_ownsModuleSingleton` in `src/core/postgres-engine.ts`, `db.connect()` returning the creator token in `src/core/db.ts`) means a short-lived probe engine's `disconnect()` can no longer null the shared connection the cycle is using. Closes #1404, #1471, #1619 (and the symptom tracked in #1570/#1535).
+- **Connection teardown is concurrency-safe.** `db.disconnect()` snapshots + nulls the singleton before awaiting `end()`; `PostgresEngine.reconnect()` shares one in-flight `_reconnectPromise` so concurrent callers await it instead of racing.
+- **Tests:** new `test/postgres-engine-singleton-ownership.test.ts` (source-level guardrails for the ownership contract), an expanded DB-gated behavioral matrix in `test/e2e/postgres-engine-disconnect-idempotency.test.ts` (owner/borrower, creation-not-role, symmetric CLI-exit, owner-reconnect-with-live-borrower), a module-style asymmetry case in `test/postgres-engine-getter-selfheal.test.ts`, and the #1570 shared-recovery regression updated to assert the fixed contract.
+
+### For contributors
+
+This is the canonical landing for a long-standing class with ~15 competing community PRs and zero merged. Thanks to **@nullhex-io** (#1651) and **@joelwp** (#1667) — the ownership-flag approach that shipped, and to **@BrendanGahan**, **@xaviroblessarries**, and the other #1471 reporters for the precise root-cause walkthroughs. Three follow-ups are filed in `TODOS.md` (connection-lifecycle hardening under concurrent module connects, facts-queue drain on the dream/fall-through paths, stale ConnectionManager refresh after reconnect) — all pre-existing and not reachable in current gbrain.
+
 ## [0.42.10.0] - 2026-06-02
 
 **Wikilinks like `[[struktura]]` that point at pages in another folder finally connect.** Until now, if you wrote `[[struktura]]` in `concepts/knowledge-graph.md` and the actual page lived at `projects/struktura.md`, GBrain silently dropped the link from its graph. Obsidian users saw a dense web of connections in their vault and a thin, broken graph inside GBrain. The issue reporter had 71 wikilinks across 20 pages — GBrain captured 12.
