@@ -2,6 +2,19 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.24.0] - 2026-06-03
+
+**Minion workers no longer silently wedge mid-job on a Supabase brain.** The background worker that runs your cron jobs, enrich fan-out, and autopilot cycle holds a lock on each job and heartbeats it every couple of seconds to say "still working." On a Supabase brain that heartbeat was running on the transaction-mode pooler (the high-traffic 6543 port), which recycles its connections per transaction. A lock is held open for minutes, so the pooler would periodically drop the socket mid-heartbeat. The worker read that dropped socket as "the lock expired," force-evicted its own in-flight job, and then sat in a claim loop holding nothing — process alive, no errors in the log, just quietly doing no work. It showed up most under heavy `enrich` load.
+
+The fix routes only the lock hot-path (`claim` and `renewLock`) to the direct **session-mode** pool (port 5432, `GBRAIN_DIRECT_DATABASE_URL`), which holds its connection open for the life of the worker so heartbeats survive. gbrain already shipped this dual-pool design for DDL and bulk work; the lock path just never used it. No new infrastructure — the direct URL was already in your config.
+
+- **Nothing to configure.** `gbrain upgrade` and the worker uses the right pool automatically on any Supabase brain. PGLite (the zero-config default) has no pooler, so this is a no-op there — same behavior on both engines.
+- **Atomicity is preserved.** Statements inside an open transaction still run on the transaction's own connection; only the standalone lock heartbeat (which never runs inside a transaction) gets rerouted. There's a kill-switch (`GBRAIN_DISABLE_DIRECT_POOL`) if you ever need the old behavior.
+- **Empirically:** a heartbeat survived 4/4 beats over 8s on the session pool, vs. connection-drop storms on the transaction pooler.
+
+### For contributors
+New `BrainEngine.executeRawDirect()` — same contract as `executeRaw`, but routes to the direct pool when dual-pool is active (no-op delegation on PGLite / non-Supabase / kill-switch). `claim`/`renewLock` in `minions/queue.ts` point at it. The Postgres impl shares its cancellation plumbing with `executeRaw` via a private `runUnsafe` helper; the in-transaction guard keys on `peekReadPool() !== _sql` so a tx clone is detected and never rerouted. New `test/postgres-execute-raw-direct.test.ts` covers the routing decision (dual-pool on/off × in-tx/not, plus abort short-circuit) without a live Postgres; `test/queue-lock-retry.test.ts` gains a guard that `claim` can never fall back to `executeRaw`. Eng review cleared the plan; the four lock/pool guards stay green.
+
 ## [0.42.20.0] - 2026-06-03
 
 **Three ways GBrain could freeze or go silent are fixed.** This release closes a
