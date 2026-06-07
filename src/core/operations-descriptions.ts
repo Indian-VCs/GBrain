@@ -119,11 +119,13 @@ export const IDEA_LINEAGE_DESCRIPTION =
   "find_trajectory (entity metric/status timeline). Returns " +
   "`{idea, resolved, candidates: [{slug, score, via}], disambiguation_needed, " +
   "degraded, matches, related, timeline, takes, trajectory, contradictions, " +
-  "contradiction_run, schema_version: 1}`. `disambiguation_needed` is true when " +
-  "the idea resolves to more than one strong anchor — let the user choose. " +
-  "`degraded` is true when semantic search was unavailable (keyword-only); cap " +
-  "confidence accordingly. Local-only (CLI / trusted local callers); not exposed " +
-  "to remote MCP. Source-scoped to the active source.";
+  "contradiction_run, partial, errors, schema_version: 2}`. `disambiguation_needed` " +
+  "is true when the idea resolves to more than one strong anchor — let the user " +
+  "choose. `degraded` is true when semantic search was unavailable (keyword-only); " +
+  "cap confidence accordingly. `partial` is true (with failed channel names in " +
+  "`errors`) when a gather channel failed but others succeeded. Source-scoped via " +
+  "the caller's grant. Remote/MCP callers see world-visibility trajectory facts " +
+  "only and do not receive the global contradiction trend.";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // v0.33.3 Cathedral III foundation — code-intelligence ops (MCP-exposed).

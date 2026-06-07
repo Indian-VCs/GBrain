@@ -9,8 +9,9 @@
  * the repeatable operator surface: point it at a real idea and see how much
  * multi-angle evidence the brain holds.
  *
- * idea_lineage is local-only, so this command is too — thin-client installs
- * (no local engine) cannot run it.
+ * This eval gathers evidence directly against the local engine, so it needs a
+ * local brain — thin-client installs (no local engine) cannot run it. (The
+ * idea_lineage op itself is remote/MCP-callable as of v0.42.x.)
  */
 
 import { appendFileSync, mkdirSync } from 'node:fs';
@@ -94,7 +95,7 @@ export async function runEvalIdeaLineage(engine: BrainEngine, args: string[]): P
 
   const cfg = loadConfig();
   if (isThinClient(cfg)) {
-    console.error('idea_lineage is local-only — `gbrain eval idea-lineage` needs a local brain (not a thin-client install).');
+    console.error('`gbrain eval idea-lineage` needs a local brain (not a thin-client install) — it gathers evidence directly against the local engine.');
     process.exit(1);
   }
 

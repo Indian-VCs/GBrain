@@ -160,16 +160,17 @@ describe('idea_lineage description', () => {
     expect(IDEA_LINEAGE_DESCRIPTION).toContain('find_trajectory');
   });
 
-  test('discloses the local-only constraint and the evidence-gather contract', () => {
-    expect(IDEA_LINEAGE_DESCRIPTION).toContain('Local-only');
+  test('discloses the remote posture and the evidence-gather contract', () => {
+    expect(IDEA_LINEAGE_DESCRIPTION).toContain('Remote/MCP callers');
+    expect(IDEA_LINEAGE_DESCRIPTION).toContain('world-visibility');
     expect(IDEA_LINEAGE_DESCRIPTION).toContain('disambiguation_needed');
     expect(IDEA_LINEAGE_DESCRIPTION).toContain('degraded');
   });
 
-  test('is registered as a local-only read op', () => {
+  test('is registered as a remote-capable read op (not localOnly)', () => {
     const op = operationsByName['idea_lineage'];
     expect(op.scope).toBe('read');
-    expect(op.localOnly).toBe(true);
+    expect(op.localOnly).toBeUndefined();
     expect(op.mutating).toBeFalsy();
     expect(operations.map((o) => o.name)).toContain('idea_lineage');
   });

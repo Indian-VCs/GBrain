@@ -2,21 +2,38 @@
 
 ## idea-lineage follow-ups (v0.42.27.0)
 
-Filed from the v0.42.27.0 idea-lineage wave. The `idea_lineage` op shipped
-**local-only** (`localOnly: true` + in-handler `ctx.remote` reject) because the
-read primitives it composes don't filter source/visibility uniformly yet.
-Surfaced by the adversarial review (federated-scope + remote-visibility findings).
+Filed from the v0.42.27.0 idea-lineage wave. Surfaced by the adversarial review
+(federated-scope + remote-visibility findings).
 
-- [ ] **P3 — Make `idea_lineage` remote/federated-callable.** Today it's
-  local-only. Lifting that requires: (1) extend `getBacklinks` and `getTimeline`
-  to accept the federated `sourceIds` array (they're scalar-`sourceId`-only,
-  `engine.ts:1138`/`:1317`) and a `remote` visibility filter, mirroring
-  `findTrajectory`'s `remote=true -> visibility='world'`; (2) source-scope the
-  cached contradiction findings (`loadContradictionsTrend` is global; the op
-  slug-filters in-memory, which doesn't prove the run was built from
-  visible/sourced evidence). Defer until a remote consumer (thin-client think,
-  a team-brain agent) actually needs lineage. Until then the localOnly gate is
-  the fail-closed correct posture.
+- [x] **P3 — Make `idea_lineage` remote/federated-callable.** DONE (v0.42.x):
+  dropped `localOnly`; `getBacklinks`/`getTimeline`/`searchTakes`/
+  `searchTakesVector` now take the federated `sourceIds` array; the trajectory
+  channel threads `remote=ctx.remote===true -> visibility='world'`;
+  contradictions are omitted for remote callers; `p.source` is validated
+  against `ctx.auth.allowedSources` (no cross-source IDOR); the gather uses
+  `Promise.allSettled` with a `partial`/`errors` flag (`schema_version: 2`).
+  HTTP/OAuth MCP only — NOT added to the subagent allow-list (see below).
+
+New follow-ups filed from the remote-lift wave:
+
+- [ ] **P3 — Source-scope the cached contradiction trend.** `loadContradictionsTrend`
+  (`src/core/contradiction-filter.ts`) reads the latest `eval_contradictions_runs`
+  globally; findings carry no per-source/visibility marker. Remote `idea_lineage`
+  therefore OMITS contradictions (fail-closed), and `find_contradictions` (a
+  shipped non-localOnly op) still serves the global trend to any remote caller.
+  Fix: join finding slugs → `pages.source_id` so both can return source-scoped
+  contradictions to remote callers. Unblocks remote contradiction evidence.
+
+- [ ] **P3 — Subagent access for `idea_lineage`.** Add it to
+  `BRAIN_TOOL_ALLOWLIST` (`src/core/minions/tools/brain-allowlist.ts`) + a usage
+  hint + the pinned allow-list test, IF minions need lineage. Subagents run
+  `sourceId='default'`, `remote=true`. Deliberately deferred — a separate,
+  explicit security decision from the HTTP/OAuth-MCP lift.
+
+- [ ] **P3 — Per-remote cost caps for `idea_lineage`.** The remote path runs a
+  5-way `Promise.allSettled` fan-out incl. `traverseGraph` depth-2; caps are
+  caller-controlled (max 50). Consider tighter remote-only caps / rate limiting
+  before high-volume federated consumers arrive.
 
 ## v0.42.21.0 module-singleton ownership follow-ups (v0.42+)
 

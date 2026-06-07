@@ -144,19 +144,72 @@ afterAll(async () => {
   resetGateway();
 });
 
-describe('idea_lineage — registration + local-only contract', () => {
-  test('is a local-only read op', () => {
+describe('idea_lineage — registration + remote-capable contract', () => {
+  test('is a remote-capable read op (not localOnly)', () => {
     expect(op().scope).toBe('read');
-    expect(op().localOnly).toBe(true);
+    expect(op().localOnly).toBeUndefined();
   });
 
-  test('rejects remote callers (permission_denied)', async () => {
-    await expect(op().handler(mkCtx({ remote: true }), { idea: 'Founder-Led Sales' }))
-      .rejects.toThrow(/local-only/i);
+  test('serves remote callers (no permission_denied for a scoped caller)', async () => {
+    const r = await op().handler(
+      mkCtx({ remote: true, auth: { allowedSources: ['default'] } as never }),
+      { idea: 'Founder-Led Sales' },
+    ) as any;
+    expect(r.resolved).toBe(ANCHOR);
+    expect(r.schema_version).toBe(2);
   });
 
   test('rejects empty idea', async () => {
     await expect(op().handler(mkCtx(), { idea: '   ' })).rejects.toBeInstanceOf(OperationError);
+  });
+});
+
+describe('idea_lineage — remote safety (D4 / contradictions / D5)', () => {
+  test('remote caller: p.source outside allowedSources is permission_denied (IDOR)', async () => {
+    await expect(op().handler(
+      mkCtx({ remote: true, auth: { allowedSources: ['default'] } as never }),
+      { idea: 'Founder-Led Sales', source: 'someone-elses-source' },
+    )).rejects.toThrow(/not within this caller/i);
+  });
+
+  test('remote caller: p.source within grant is allowed', async () => {
+    const r = await op().handler(
+      mkCtx({ remote: true, auth: { allowedSources: ['default'] } as never }),
+      { idea: 'Founder-Led Sales', source: 'default' },
+    ) as any;
+    expect(r.resolved).toBe(ANCHOR);
+  });
+
+  test('local caller keeps the free p.source override (remote=false)', async () => {
+    const r = await op().handler(mkCtx(), { idea: 'Founder-Led Sales', source: 'default' }) as any;
+    expect(r.resolved).toBe(ANCHOR);
+    // Local path still returns the anchor-scoped contradiction trend.
+    expect(r.contradictions.length).toBe(1);
+  });
+
+  test('remote caller: global contradiction trend is omitted (fail-closed)', async () => {
+    const r = await op().handler(
+      mkCtx({ remote: true, auth: { allowedSources: ['default'] } as never }),
+      { idea: 'Founder-Led Sales' },
+    ) as any;
+    expect(r.contradictions).toEqual([]);
+    expect(r.contradiction_run).toBeNull();
+  });
+
+  test('D5: one failed gather channel degrades to partial, not a 500', async () => {
+    const orig = engine.getTimeline.bind(engine);
+    (engine as any).getTimeline = async () => { throw new Error('boom'); };
+    try {
+      const r = await op().handler(mkCtx(), { idea: 'Founder-Led Sales' }) as any;
+      expect(r.partial).toBe(true);
+      expect(r.errors).toContain('timeline');
+      expect(r.timeline).toEqual([]);
+      // Other channels still resolved.
+      expect(r.resolved).toBe(ANCHOR);
+      expect(r.related.length).toBeGreaterThan(0);
+    } finally {
+      (engine as any).getTimeline = orig;
+    }
   });
 });
 
@@ -165,7 +218,8 @@ describe('idea_lineage — feature recovery on a known lineage', () => {
     const r = await op().handler(mkCtx(), { idea: 'Founder-Led Sales' }) as any;
     expect(r.resolved).toBe(ANCHOR);
     expect(r.disambiguation_needed).toBe(false);
-    expect(r.schema_version).toBe(1);
+    expect(r.schema_version).toBe(2);
+    expect(r.partial).toBe(false);
     // Keyword-only path (no embedding provider) is flagged degraded.
     expect(r.degraded).toBe(true);
     expect(r.matches.length).toBeGreaterThan(0);
@@ -217,5 +271,37 @@ describe('idea_lineage — disambiguation + empty evidence', () => {
     expect(r.takes).toEqual([]);
     expect(r.contradictions).toEqual([]);
     expect(r.trajectory).toEqual([]);
+  });
+});
+
+describe('searchTakesVector — federated source isolation (T10)', () => {
+  // searchTakesVector got the same source predicate as searchTakes in T5.
+  // Engine-parity (engine-parity.test.ts) pins the trigram path cross-engine;
+  // this pins the vector path's source EXCLUSION directly (dim-controlled).
+  const SA = 'vt-a';
+  const SB = 'vt-b';
+  const PA = 'concepts/vt-page-a';
+  const PB = 'concepts/vt-page-b';
+
+  beforeAll(async () => {
+    for (const [src, slug, idx] of [[SA, PA, 5], [SB, PB, 6]] as const) {
+      await engine.executeRaw(`INSERT INTO sources (id, name, config) VALUES ($1, $1, '{}'::jsonb) ON CONFLICT DO NOTHING`, [src]);
+      const { id } = await engine.putPage(slug, { type: 'concept' as never, title: `VT ${src}`, compiled_truth: 'vt body', timeline: '' }, { sourceId: src });
+      await engine.addTakesBatch([{ page_id: id, row_num: 1, claim: `vector take ${src}`, kind: 'take', holder: 'h', weight: 0.8 }]);
+      // takes.embedding is vector(1536) (distinct from the 1280d chunk column
+      // this PGLite engine bootstraps for FTS-only runs).
+      const vec = `[${Array.from(basisEmbedding(idx, 1536)).join(',')}]`;
+      await engine.executeRaw(`UPDATE takes SET embedding = $1::vector WHERE page_id = $2`, [vec, id]);
+    }
+  });
+
+  test('scalar scope excludes the other source; federated unions', async () => {
+    const q = basisEmbedding(5, 1536);
+    const a = await engine.searchTakesVector(q, { sourceId: SA });
+    expect(a.map(t => t.page_slug)).toEqual([PA]);
+    const b = await engine.searchTakesVector(q, { sourceId: SB });
+    expect(b.map(t => t.page_slug)).toEqual([PB]);
+    const fed = await engine.searchTakesVector(q, { sourceIds: [SA, SB] });
+    expect(fed.map(t => t.page_slug).sort()).toEqual([PA, PB]);
   });
 });

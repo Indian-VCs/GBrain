@@ -3241,15 +3241,15 @@ const idea_lineage: Operation = {
   name: 'idea_lineage',
   description: IDEA_LINEAGE_DESCRIPTION,
   scope: 'read',
-  // Local-only (TEN3A): rejected from HTTP MCP at tool-list time
-  // (serve-http.ts filters on `localOnly`) AND at runtime via the in-handler
-  // ctx.remote check. This sidesteps the federated-scope / remote-visibility
-  // gaps in the reused primitives (getBacklinks/getTimeline are scalar-sourceId
-  // only; contradiction trend is global) — a local caller is scoped to the
-  // scalar ctx.sourceId and sees its own brain. Lifting this to remote later
-  // requires federating those engine methods first. Mirrors
-  // get_recent_transcripts (defense in depth: hidden + rejected).
-  localOnly: true,
+  // v0.42.x: remote/agent-callable (HTTP/OAuth MCP), mirroring find_trajectory.
+  // Safety comes from (a) federated source isolation — every channel gets the
+  // same sourceScopeOpts(ctx) scope, and getBacklinks/getTimeline/searchTakes
+  // are now sourceIds[]-aware; (b) the trajectory channel threads
+  // remote=ctx.remote===true → visibility='world'; (c) contradictions (global,
+  // unscoped trend) are omitted for remote callers; (d) the `source` override
+  // is validated against ctx.auth.allowedSources for remote callers (no
+  // cross-source IDOR). NOT added to the subagent BRAIN_TOOL_ALLOWLIST — that
+  // is a separate, deliberate security decision (see TODOS).
   params: {
     idea: { type: 'string', required: true, description: 'Free-text idea, topic, concept phrase, or concept slug.' },
     source: { type: 'string', description: 'Scope to a single source id. Defaults to OperationContext.sourceId.' },
@@ -3261,15 +3261,7 @@ const idea_lineage: Operation = {
     max_takes: { type: 'number', description: 'Max attributed takes. Default 12, cap 50.' },
   },
   handler: async (ctx, p) => {
-    // Trust gate: idea_lineage is local-only. Subagents always run remote=true,
-    // so they are correctly rejected here (the op is not in the subagent
-    // allow-list, and would be a footgun if visible).
-    if (ctx.remote === true) {
-      throw new OperationError(
-        'permission_denied',
-        'idea_lineage is local-only — call via the gbrain CLI.',
-      );
-    }
+    const remote = ctx.remote === true;
     const idea = typeof p.idea === 'string' ? p.idea.trim() : '';
     if (!idea) {
       throw new OperationError('invalid_params', 'idea_lineage requires `idea` (non-empty string).');
@@ -3282,11 +3274,35 @@ const idea_lineage: Operation = {
     const maxTimeline = cap(p.max_timeline, 20, 100);
     const maxTakes = cap(p.max_takes, 12, 50);
 
-    // Local-only ⇒ scalar source scope (no federated allowedSources array).
+    // Source scope (D4): one validated scope object threaded to every channel.
+    // Federated allowedSources array > scalar ctx.sourceId. A remote caller MAY
+    // pass `source` to narrow within its grant, but it must be inside
+    // ctx.auth.allowedSources / ctx.sourceId — otherwise it's a cross-source
+    // IDOR. Local CLI (remote=false) keeps the free override.
     const sourceParam = typeof p.source === 'string' && p.source.length > 0 ? p.source : undefined;
-    const scope = sourceParam ? { sourceId: sourceParam } : sourceScopeOpts(ctx);
-    const scalarSourceId = (scope as { sourceId?: string }).sourceId;
-    const scalarScopeOpts = scalarSourceId ? { sourceId: scalarSourceId } : {};
+    let scope: { sourceId?: string; sourceIds?: string[] };
+    if (sourceParam) {
+      if (remote) {
+        const allowed = ctx.auth?.allowedSources;
+        const inGrant = allowed && allowed.length > 0
+          ? allowed.includes(sourceParam)
+          : ctx.sourceId
+            ? sourceParam === ctx.sourceId
+            : false;
+        if (!inGrant) {
+          throw new OperationError(
+            'permission_denied',
+            `idea_lineage: source '${sourceParam}' is not within this caller's allowed sources.`,
+          );
+        }
+      }
+      scope = { sourceId: sourceParam };
+    } else {
+      scope = sourceScopeOpts(ctx);
+    }
+    if (remote) {
+      ctx.logger?.info?.(`idea_lineage remote call: scope=${JSON.stringify(scope)} idea_len=${idea.length}`);
+    }
     const since = typeof p.since === 'string' ? p.since : undefined;
     const until = typeof p.until === 'string' ? p.until : undefined;
 
@@ -3361,20 +3377,41 @@ const idea_lineage: Operation = {
         trajectory: [],
         contradictions: [],
         contradiction_run: null,
-        schema_version: 1,
+        partial: false,
+        errors: [],
+        schema_version: 2,
       };
     }
 
     // ── Phase 2: gather evidence for the resolved anchor ────────────────────
     // Parallel fan-out is correct ONLY here, after the anchor slug is known
     // (resolve→gather, Codex #8). Graph depth pinned to 2 (P2A).
-    const [backlinks, graph, timeline, takes, contraBundle] = await Promise.all([
-      ctx.engine.getBacklinks(resolved, scalarScopeOpts),
+    //
+    // D5: allSettled, not all — one slow/failed channel degrades to an empty
+    // bucket plus a `partial`/`errors` flag, instead of 500ing the whole
+    // lineage (mirrors the `degraded` posture for the search channel).
+    // Contradictions: the cached trend is global + unscoped, so it is NOT
+    // loaded for remote callers (fail-closed). All five channels get the SAME
+    // validated `scope` object (no scalar/federated mismatch).
+    const errors: string[] = [];
+    const pick = <T>(r: PromiseSettledResult<T>, fallback: T, label: string): T => {
+      if (r.status === 'fulfilled') return r.value;
+      errors.push(label);
+      ctx.logger?.warn?.(`idea_lineage: ${label} channel failed: ${String(r.reason)}`);
+      return fallback;
+    };
+    const gather = await Promise.allSettled([
+      ctx.engine.getBacklinks(resolved, scope),
       ctx.engine.traverseGraph(resolved, 2, scope),
-      ctx.engine.getTimeline(resolved, scalarSourceId ? { sourceId: scalarSourceId } : undefined),
-      ctx.engine.searchTakes(idea, { limit: maxTakes, ...scalarScopeOpts, takesHoldersAllowList: ctx.takesHoldersAllowList }),
-      loadLatestContradictionFindings(ctx.engine),
-    ]);
+      ctx.engine.getTimeline(resolved, scope),
+      ctx.engine.searchTakes(idea, { limit: maxTakes, ...scope, takesHoldersAllowList: ctx.takesHoldersAllowList }),
+      remote ? Promise.resolve(null) : loadLatestContradictionFindings(ctx.engine),
+    ] as const);
+    const backlinks = pick(gather[0], [], 'backlinks');
+    const graph = pick(gather[1], [], 'graph');
+    const timeline = pick(gather[2], [], 'timeline');
+    const takes = pick(gather[3], [], 'takes');
+    const contraBundle = pick(gather[4], null, 'contradictions');
 
     // Related concepts: inbound edges (descendants / abandoned branches) +
     // depth-2 graph neighbors, deduped by slug, excluding the anchor itself.
@@ -3396,7 +3433,7 @@ const idea_lineage: Operation = {
       const points = await ctx.engine.findTrajectory({
         entitySlug: resolved,
         ...scope,
-        remote: false,
+        remote,
         limit: 100,
       });
       trajectory = points.map((pt) => ({
@@ -3436,7 +3473,9 @@ const idea_lineage: Operation = {
       trajectory,
       contradictions,
       contradiction_run: contraBundle ? { run_id: contraBundle.run_id, ran_at: contraBundle.ran_at } : null,
-      schema_version: 1,
+      partial: errors.length > 0,
+      errors,
+      schema_version: 2,
     };
   },
   cliHints: { name: 'idea-lineage', positional: ['idea'] },
