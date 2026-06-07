@@ -24,6 +24,28 @@ For the voice agent recipe, you can now summon a persona into a specific topic s
 ### To take advantage of v0.42.29.0
 
 Upgrade and restart your worker/supervisor. Nothing to configure. If `gbrain doctor` flags a supervisor singleton mismatch, stop the extra supervisor (`gbrain jobs supervisor stop`) and keep one per queue.
+## [0.42.28.0] - 2026-06-06
+
+**`gbrain extract links --stale` no longer dies partway through on calendar and meeting pages.** A full re-extraction sweep (the kind a `LINK_EXTRACTOR_VERSION_TS` bump triggers) used to crash with a Postgres "malformed array literal" error the moment a calendar event's raw text (Zoom links, commas, quotes, braces, em-dashes) landed in a batch. One bad batch aborted the entire run, so the graph never finished reconciling and stale edges couldn't be dropped. The three bulk writers (links, timeline, takes) now pass each batch as a single JSONB document instead of a hand-built `text[]` literal, which encodes arbitrary free text safely. The sweep runs to completion on the messiest brains.
+
+The same pass makes `addTakesBatch` survive a connection blip mid-run (it retries like the other bulk writers instead of silently dropping the batch) and tightens how stray NUL bytes are handled: junk NULs in free-text bodies (a claim, a meeting summary, a link's context) are stripped so one byte can't abort a batch, while identity fields (slugs, holders, source ids, dates) still reject them.
+
+Nothing to configure. `gbrain upgrade`, then re-run any extraction that was wedged.
+
+### Fixed
+- `extract links --stale` (and any links/timeline/takes bulk write) no longer crashes with "malformed array literal" when a row carries calendar/meeting free text. Batches bind as one JSONB document via `jsonb_to_recordset` instead of a `text[]` array literal, which also removes the 65535-parameter ceiling on batch size.
+- `addTakesBatch` retries on transient connection errors like the other bulk writers, instead of losing the batch on a pooler blip.
+
+### Changed
+- Stray NUL bytes in free-text fields (claim, summary, detail, link context) are stripped before write so a single junk byte can't abort a batch; identity/security fields (slugs, source ids, holders, dates) are left to reject NUL as before.
+
+### To take advantage of v0.42.28.0
+
+Nothing to run. If a `gbrain extract links --stale` sweep previously died on a calendar or meeting page, re-run it:
+
+```bash
+gbrain extract links --source <your-source> --stale
+```
 
 ## [0.42.26.0] - 2026-06-04
 
