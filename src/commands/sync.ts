@@ -1819,6 +1819,11 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
         // correct only when the gate compared HEAD == captured; under pinning a
         // forward delete must not block.
         await markCompleted(path);
+        // issue #1939 adversarial finding #1: a file that previously failed to
+        // parse (open ledger row) and is now gone from disk is resolved — clear
+        // its row so it can't age doctor to a permanent FAIL. (This covers the
+        // net-zero add-then-delete range where the path isn't in filtered.deleted.)
+        succeededPaths.push(path);
         progress.tick(1, `skip:${path}`);
         return;
       }
@@ -2030,10 +2035,20 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     await clearOpCheckpoint(engine, ckpt.target);
   };
 
+  // issue #1939 adversarial finding #1: a file that failed to parse (open ledger
+  // row) and is then deleted/renamed-away never re-enters failedFiles and never
+  // imports, so its row would never clear and would age doctor to a permanent
+  // FAIL. Treat removed paths as resolved so the ledger self-heals.
+  const resolvedPaths = [
+    ...succeededPaths,
+    ...filtered.deleted,
+    ...filtered.renamed.map(r => r.from),
+  ];
+
   const gate = await applySyncFailureGate({
     sourceId: opts.sourceId ?? DEFAULT_SOURCE_ID,
     failedFiles,
-    succeededPaths,
+    succeededPaths: resolvedPaths,
     commit: pin,
     skipFailed: opts.skipFailed === true,
     advance,

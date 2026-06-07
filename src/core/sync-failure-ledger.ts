@@ -651,8 +651,11 @@ export function decideSyncFailureSeverity(args: {
   }
   const blockedTooLong =
     Number.isFinite(oldestOpenMs) && args.nowMs - oldestOpenMs > args.failHours * 3_600_000;
-  const status: 'warn' | 'fail' =
-    unresolved.length >= 10 || blockedTooLong ? 'fail' : 'warn';
+  // FAIL keys off OPEN (blocking) failures only — many open, or one blocking the
+  // bookmark past the fail cadence. `auto_skipped` rows already advanced the
+  // bookmark (indexing is NOT wedged) so they stay WARN-visible regardless of
+  // count, matching the state-machine contract. (#1939 adversarial finding #3.)
+  const status: 'warn' | 'fail' = open >= 10 || blockedTooLong ? 'fail' : 'warn';
   return { status, unresolved: unresolved.length, open, auto_skipped: autoSkipped };
 }
 

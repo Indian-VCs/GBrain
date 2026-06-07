@@ -628,4 +628,30 @@ describeE2E('E2E: sync --skip-failed structured summary loop (v0.22.12, issue #5
       else process.env.GBRAIN_SYNC_AUTOSKIP_AFTER = prevThreshold;
     }
   });
+
+  // issue #1939 adversarial finding #1: a parse-failed file that is later DELETED
+  // from the repo must not leave a permanent open ledger row (which would age
+  // doctor to FAIL forever). The incremental gate treats removed paths as resolved.
+  test('deleting a failed file clears its ledger row (self-heal, no stuck FAIL)', async () => {
+    const { performSync } = await import('../../src/commands/sync.ts');
+    const { loadSyncFailures } = await import('../../src/core/sync.ts');
+    const engine = getEngine();
+
+    writeFileSync(join(repoPath, 'people/gonepoison.md'), [
+      '---', 'type: person', 'title: Gone', 'slug: wrong-derived-slug', '---', '', 'Body.',
+    ].join('\n'));
+    execSync('git add -A && git commit -m "add a file that fails to parse"', { cwd: repoPath, stdio: 'pipe' });
+
+    // Sync blocks; an open ledger row exists for the bad file.
+    let result = await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    expect(result.status).toBe('blocked_by_failures');
+    expect(loadSyncFailures().some(f => f.path.includes('gonepoison'))).toBe(true);
+
+    // Delete the file and sync. The removed path is treated as resolved, so the
+    // ledger row is cleared and the bookmark advances.
+    execSync('git rm people/gonepoison.md && git commit -m "delete the bad file"', { cwd: repoPath, stdio: 'pipe' });
+    result = await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    expect(result.status).not.toBe('blocked_by_failures');
+    expect(loadSyncFailures().some(f => f.path.includes('gonepoison'))).toBe(false);
+  });
 });

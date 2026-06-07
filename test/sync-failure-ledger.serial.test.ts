@@ -189,9 +189,16 @@ describe('#1 severity — auto_skipped stays visible (WARN)', () => {
       nowMs: now, failHours,
     }).status).toBe('fail');
 
-    // 10 recent open → fail (count)
+    // 10 recent OPEN → fail (count of blocking failures)
     const ten = Array.from({ length: 10 }, (_, i) => ({ ...base, path: `a${i}.md`, state: 'open' as const, ts: '2026-06-06T23:00:00Z' }));
     expect(decideSyncFailureSeverity({ entries: ten, nowMs: now, failHours }).status).toBe('fail');
+
+    // 10 recent AUTO_SKIPPED → still warn (#3): the valve already advanced the
+    // bookmark, so indexing is not wedged. Visible, not gating.
+    const tenSkipped = Array.from({ length: 10 }, (_, i) => ({ ...base, path: `s${i}.md`, state: 'auto_skipped' as const, ts: '2026-06-06T23:00:00Z' }));
+    const skSev = decideSyncFailureSeverity({ entries: tenSkipped, nowMs: now, failHours });
+    expect(skSev.status).toBe('warn');
+    expect(skSev.auto_skipped).toBe(10);
 
     // auto_skipped only → warn (still visible), counted
     const sev = decideSyncFailureSeverity({
