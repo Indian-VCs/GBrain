@@ -211,7 +211,7 @@ architectural rounds shipped in the budget-cathedral wave that followed:
 - **P4 (unicode sanitization):** `ensureWellFormed` (in `src/core/text-safe.ts`,
   used by `src/core/brainstorm/orchestrator.ts`) replaces unpaired surrogates
   with U+FFFD before serialization. (Consolidated from the original hand-rolled
-  `sanitizeUnicode` in v0.42.39.0 / #2011.)
+  `sanitizeUnicode` in v0.42.40.0 / #2011.)
 - **P5 (BudgetTracker at the gateway layer):** new
   `src/core/budget/budget-tracker.ts` is the canonical primitive. The
   gateway's `withBudgetTracker(tracker, fn)` composes via
