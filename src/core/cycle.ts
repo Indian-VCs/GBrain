@@ -1033,6 +1033,21 @@ async function runPhaseExtractFacts(
       || result.phantomsSkippedDrift)
       ? `, ${result.phantomsRedirected} phantom(s) redirected (${result.phantomsAmbiguous} ambiguous, ${result.phantomsSkippedDrift} drift-skipped)`
       : '';
+    // #1928: a reconcile that deletes far more facts than it reinserts is the
+    // signature of the conversation-facts wipe (factsDeleted 1829, inserted 0
+    // read as a no-op "ok" before this guard). Surface net deletion above a
+    // floor as `warn` so the daily report and doctor make it visible instead
+    // of it reading like a clean run.
+    const NET_DELETION_WARN_FLOOR = 50;
+    const netDeleted = result.factsDeleted - result.factsInserted;
+    const netDeletionWarn = netDeleted >= NET_DELETION_WARN_FLOOR;
+    if (netDeletionWarn) {
+      result.warnings.push(
+        `net_fact_deletion: reconcile removed ${result.factsDeleted} fact(s) and ` +
+        `reinserted ${result.factsInserted} (net -${netDeleted}). If unexpected, a ` +
+        `destructive full walk may have wiped non-fence facts (#1928).`,
+      );
+    }
     return {
       phase: 'extract_facts',
       status: result.warnings.length > 0 ? 'warn' : 'ok',
@@ -1688,8 +1703,18 @@ export async function runCycle(
         // the sources table doesn't recognize this brainDir (pre-multi-
         // source installs).
         const xfSourceId = cycleSourceId ?? 'default';
+        // #1928: extract_facts is DESTRUCTIVE (wipe-and-reinsert per page). It
+        // must NOT inherit the "sync failed ⇒ undefined ⇒ full walk" fallback
+        // that's safe for link/timeline extract. When the sync phase RAN but
+        // failed, syncPagesAffected is undefined (a successful no-op sync
+        // returns []). In that case pass [] (no-op) so a lock-contention or
+        // transient sync failure can't escalate into a brain-wide fact wipe.
+        // undefined still reaches here (intended full reconcile) only when the
+        // sync phase was not part of this cycle at all.
+        const syncRanButFailed = phases.includes('sync') && syncPagesAffected === undefined;
+        const xfSlugs = syncRanButFailed ? [] : syncPagesAffected;
         const { result, duration_ms } = await timePhase(() =>
-          runPhaseExtractFacts(engine, brainDir, xfSourceId, dryRun, syncPagesAffected, opts.signal));
+          runPhaseExtractFacts(engine, brainDir, xfSourceId, dryRun, xfSlugs, opts.signal));
         result.duration_ms = duration_ms;
         phaseResults.push(result);
         progress.finish();
