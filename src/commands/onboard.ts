@@ -45,6 +45,13 @@ export async function runOnboard(engine: BrainEngine, args: string[]): Promise<v
   // No-op without a pack_upgrade_available finding.
   const explain = args.includes('--explain');
   const targetScore = parseInt10(args, '--target-score') ?? 90;
+  // v0.42.42.0 (#2139): `--max-usd off`/`unlimited`/`none` → run uncapped. maxUsd
+  // stays undefined, which runRemediation already treats as no ceiling (skips the
+  // est-cost refusal + BudgetTracker runs uncapped); `maxUsdOff` lifts the
+  // missing-cap refusal below. Spend is still ledgered.
+  const maxUsdIdx = args.indexOf('--max-usd');
+  const maxUsdVal = maxUsdIdx >= 0 ? (args[maxUsdIdx + 1] ?? '').trim().toLowerCase() : '';
+  const maxUsdOff = ['off', 'unlimited', 'none'].includes(maxUsdVal);
   const maxUsdRaw = parseFloat10(args, '--max-usd');
   const maxUsd = maxUsdRaw === null ? undefined : maxUsdRaw;
 
@@ -96,14 +103,15 @@ export async function runOnboard(engine: BrainEngine, args: string[]): Promise<v
   // remediation budget tracker. An explicit --max-usd always wins.
   if (auto && maxUsd === undefined) {
     const { resolveSpendPosture } = await import('../core/spend-posture.ts');
-    if ((await resolveSpendPosture(engine)) === 'tokenmax') {
-      process.stderr.write('spend.posture=tokenmax: onboard --auto running uncapped, spend ledgered. docs: docs/operations/spend-controls.md\n');
+    const tokenmax = (await resolveSpendPosture(engine)) === 'tokenmax';
+    if (maxUsdOff || tokenmax) {
+      process.stderr.write(`${maxUsdOff ? '--max-usd off' : 'spend.posture=tokenmax'}: onboard --auto running uncapped, spend ledgered. docs: docs/operations/spend-controls.md\n`);
     } else {
       process.stderr.write(
         `gbrain onboard --auto refuses without --max-usd N.\n` +
         `Set a cap to avoid surprise spend:\n` +
         `  gbrain onboard --auto --max-usd 5\n` +
-        `Or set spend.posture=tokenmax to run uncapped. docs: docs/operations/spend-controls.md\n`,
+        `Or pass --max-usd off / set spend.posture=tokenmax to run uncapped. docs: docs/operations/spend-controls.md\n`,
       );
       process.exit(2);
     }

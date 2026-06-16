@@ -444,16 +444,19 @@ export async function runReindexCodeCli(engine: BrainEngine, args: string[]): Pr
   }
 
   // F3: --max-cost / --max-cost-usd both accepted for symmetry with brainstorm.
-  // v0.42.42.0 (#2139): `off`/`unlimited`/`none` → no cap (undefined). Numeric
-  // must be positive; `0`/garbage is rejected.
+  // v0.42.42.0 (#2139): `off`/`unlimited`/`none` → no runtime cap AND an explicit
+  // "cost isn't the constraint" decision that proceeds past the confirmation gate
+  // (like --yes). Numeric must be positive; `0`/garbage is rejected.
   let maxCostUsd: number | undefined;
+  let maxCostOff = false;
   for (const flag of ['--max-cost', '--max-cost-usd']) {
     const idx = args.indexOf(flag);
     if (idx >= 0) {
       const v = args[idx + 1];
       const t = (v ?? '').trim().toLowerCase();
       if (['off', 'unlimited', 'none'].includes(t)) {
-        maxCostUsd = undefined; // no cap
+        maxCostUsd = undefined; // no runtime cap (reindex skips the tracker when unset)
+        maxCostOff = true;
         break;
       }
       const n = v ? parseFloat(v) : NaN;
@@ -505,11 +508,14 @@ export async function runReindexCodeCli(engine: BrainEngine, args: string[]): Pr
       // constraint). The spend is still ledgered by the runtime BudgetTracker.
       const { resolveSpendPosture } = await import('../core/spend-posture.ts');
       const posture = await resolveSpendPosture(engine);
-      if (posture === 'tokenmax') {
+      // An explicit `--max-cost off` is the same "cost isn't the constraint"
+      // signal as spend.posture=tokenmax — proceed past the confirmation gate.
+      if (posture === 'tokenmax' || maxCostOff) {
+        const gate = maxCostOff ? 'max_cost_off' : 'posture_tokenmax';
         if (json) {
-          console.log(JSON.stringify({ status: 'proceeding', gate: 'posture_tokenmax', codePages: preview.totalPages, totalTokens: preview.totalTokens, costUsd, model: getEmbeddingModelName() }));
+          console.log(JSON.stringify({ status: 'proceeding', gate, codePages: preview.totalPages, totalTokens: preview.totalTokens, costUsd, model: getEmbeddingModelName() }));
         } else {
-          console.log(`${previewMsg} spend.posture=tokenmax: proceeding (informational). docs: docs/operations/spend-controls.md`);
+          console.log(`${previewMsg} ${maxCostOff ? '--max-cost off' : 'spend.posture=tokenmax'}: proceeding (informational). docs: docs/operations/spend-controls.md`);
         }
       } else {
         const isTTY = Boolean(process.stdout.isTTY) && Boolean(process.stdin.isTTY);

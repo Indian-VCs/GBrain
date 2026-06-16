@@ -23,6 +23,7 @@ import {
   computeSyncDelta,
   buildDetachedWorkingTreeManifest,
 } from '../core/sync-delta.ts';
+import { fetchRemote } from '../core/git-remote.ts';
 import {
   parseUsdLimit,
   formatUsdLimit,
@@ -311,7 +312,10 @@ function resolveEstimateTarget(localPath: string): { target: string; detached: b
   }
   if (branch && branch !== 'HEAD' && hasOriginRemote(localPath)) {
     try {
-      git(localPath, ['fetch', 'origin', branch]);
+      // v0.42.42.0 (#2139): route through the SSRF-hardened fetch (same flags +
+      // no-prompt env as pullRepo) — a cost preview / dry-run must NOT hit a
+      // remote through a less-protected path than real sync.
+      fetchRemote(localPath, branch, { timeoutMs: 30_000 });
     } catch {
       // fail-open: offline, auth failure, no upstream — fall through to local HEAD.
     }
