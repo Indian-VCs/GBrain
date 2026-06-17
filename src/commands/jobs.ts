@@ -1607,6 +1607,13 @@ export async function registerBuiltinHandlers(
     //     archived between fan-out and worker claim, skip cleanly.
     const rawSourceId = job.data.source_id;
     let sourceId: string | undefined;
+    // issue #2227/#2194 (TODOS:634, codex #8): a per-source cycle must run its
+    // FILESYSTEM phases (sync/lint/extract) against the SOURCE's own checkout,
+    // not the global brain's. Pre-fix it inherited `repoPath` (the default
+    // checkout) while writing DB freshness for `source_id` — mixed scope that
+    // made cooldown/freshness attribute to the wrong source. We resolve the
+    // source's `local_path` here and use it as the cycle's brainDir below.
+    let sourceLocalPath: string | null = null;
     if (rawSourceId !== undefined && rawSourceId !== null) {
       if (typeof rawSourceId !== 'string') {
         throw new Error(`autopilot-cycle: invalid source_id (not a string): ${JSON.stringify(rawSourceId)}`);
@@ -1620,9 +1627,10 @@ export async function registerBuiltinHandlers(
       }
       // Archive recheck (codex r1 P1-5): cheap pre-cycle lookup. Returns
       // immediately if source is gone or archived; runCycle never even
-      // acquires a lock.
-      const rows = await engine.executeRaw<{ archived: boolean | null }>(
-        `SELECT archived FROM sources WHERE id = $1`,
+      // acquires a lock. Also fetches local_path so FS phases bind to the
+      // source's own checkout (the #2227/#2194 mixed-scope fix).
+      const rows = await engine.executeRaw<{ archived: boolean | null; local_path: string | null }>(
+        `SELECT archived, local_path FROM sources WHERE id = $1`,
         [rawSourceId],
       );
       if (rows.length === 0) {
@@ -1640,7 +1648,16 @@ export async function registerBuiltinHandlers(
         };
       }
       sourceId = rawSourceId;
+      sourceLocalPath = typeof rows[0].local_path === 'string' && rows[0].local_path.length > 0
+        ? rows[0].local_path
+        : null;
     }
+
+    // Effective checkout for FS phases. For a per-source cycle, bind to the
+    // SOURCE's local_path (or null → skip FS phases for a pure-DB source);
+    // NEVER fall through to the global repoPath, which would run sync/lint
+    // against the wrong tree. Legacy (no source_id) keeps the global repoPath.
+    const effectiveBrainDir: string | null = sourceId ? sourceLocalPath : repoPath;
 
     // Allow callers to select phases via job data (e.g. skip embed for
     // fast cycles). Validates against ALL_PHASES to prevent injection.
@@ -1654,7 +1671,7 @@ export async function registerBuiltinHandlers(
     const pull = typeof job.data.pull === 'boolean' ? job.data.pull : true;
 
     const report = await runCycle(engine, {
-      brainDir: repoPath,
+      brainDir: effectiveBrainDir,
       pull,
       signal: job.signal, // propagate abort so cycle bails on timeout/cancel
       ...(sourceId ? { sourceId } : {}),
