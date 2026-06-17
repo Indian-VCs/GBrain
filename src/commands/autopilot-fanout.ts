@@ -84,6 +84,62 @@ export async function resolveFanoutMax(engine: BrainEngine): Promise<number> {
 }
 
 /**
+ * Read the worker concurrency the supervisor most recently STARTED with, from
+ * its `started` audit event (the lowest-coupling source — no extra lock-row
+ * column). Filesystem read; returns null when no supervisor has ever started
+ * (or the event lacks concurrency). Filtered by queue so a `shell`-queue
+ * supervisor's concurrency doesn't leak into the `default`-queue decision.
+ *
+ * ADVISORY use only (doctor warning). Behavior-changing callers (the fanout
+ * clamp) must additionally gate on a LIVE supervisor — see
+ * resolveEffectiveFanoutMax — because a stale `started` row can otherwise
+ * shrink fan-out for a supervisor that isn't running that config (codex #9/D5).
+ */
+export async function readSupervisorConcurrency(queue = 'default'): Promise<number | null> {
+  try {
+    const { readSupervisorEvents } = await import('../core/minions/handlers/supervisor-audit.ts');
+    const events = readSupervisorEvents({ sinceMs: 24 * 60 * 60 * 1000 });
+    const started = events
+      .filter((e) => e.event === 'started' && (e.queue === undefined || e.queue === queue))
+      .pop();
+    const c = started?.concurrency;
+    return typeof c === 'number' && Number.isFinite(c) ? c : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve fanoutMax CLAMPED to the worker's effective concurrency (#2194 fix #1).
+ *
+ * Fanning out more cycles than the worker can run guarantees waiters that then
+ * race the stalled-sweeper. Clamp to `max(1, concurrency - 1)` — reserving ≥1
+ * slot for targeted sync/embed jobs that share the `default` queue.
+ *
+ * codex #9 / D5: the clamp is BEHAVIOR-changing, so it trusts only a
+ * proven-alive supervisor (live DB-lock holder, `ttl_expires_at`-gated). With
+ * no live holder the concurrency is UNKNOWN and we fall back to the unclamped
+ * default (4 pg / 1 pglite) — the safe direction (never starve on stale data).
+ * Operators can disable the clamp via `autopilot.fanout_clamp_to_concurrency`.
+ */
+export async function resolveEffectiveFanoutMax(engine: BrainEngine, queue = 'default'): Promise<number> {
+  const base = await resolveFanoutMax(engine);
+  const clampCfg = await engine.getConfig('autopilot.fanout_clamp_to_concurrency');
+  if (clampCfg === 'false' || clampCfg === '0') return base; // operator opt-out
+  try {
+    const { inspectLock, isLockHolderLive } = await import('../core/db-lock.ts');
+    const { supervisorLockId, SUPERVISOR_LOCK_TTL_MIN } = await import('../core/minions/supervisor.ts');
+    const snap = await inspectLock(engine, supervisorLockId(queue));
+    if (!snap || !isLockHolderLive(snap, SUPERVISOR_LOCK_TTL_MIN)) return base; // no live holder → unknown → no clamp
+    const concurrency = await readSupervisorConcurrency(queue);
+    if (concurrency === null) return base;
+    return Math.max(1, Math.min(base, concurrency - 1));
+  } catch {
+    return base;
+  }
+}
+
+/**
  * Read `last_full_cycle_at` ISO string from a source's config JSONB.
  * Returns null when missing or unparseable. Pure function over the row
  * shape `listAllSources` returns (config is already a parsed object).

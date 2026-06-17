@@ -871,8 +871,12 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
           // codex P1-3). Fresh-install brains with no sources rows fall
           // back to the legacy single autopilot-cycle so existing
           // behavior is preserved.
-          const { dispatchPerSource, resolveFanoutMax } = await import('./autopilot-fanout.ts');
-          const fanoutMax = await resolveFanoutMax(engine);
+          const { dispatchPerSource, resolveEffectiveFanoutMax } = await import('./autopilot-fanout.ts');
+          // #2194 fix #1: clamp fan-out to the worker's effective concurrency
+          // (reserve ≥1 slot), gated on a LIVE supervisor so a stale audit row
+          // can't shrink throughput (codex #9/D5). autopilot-cycle jobs run on
+          // the 'default' queue, so that's the concurrency we compare against.
+          const fanoutMax = await resolveEffectiveFanoutMax(engine, 'default');
           const result = await dispatchPerSource(engine, queue, {
             repoPath,
             slot,
