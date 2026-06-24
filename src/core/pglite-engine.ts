@@ -30,6 +30,7 @@ import type {
   SearchResult, SearchOpts,
   Link, GraphNode, GraphPath,
   TimelineEntry, TimelineInput, TimelineOpts,
+  ChronicleTimelineRow, ChronicleTimelineOpts, LastSeenResult,
   RawData,
   PageVersion,
   BrainStats, BrainHealth,
@@ -48,6 +49,7 @@ import { normalizeWeightForStorage } from './takes-fence.ts';
 import { executeRawJsonb } from './sql-query.ts';
 import { sanitizeForJsonb, buildLinkRows, buildTimelineRows, buildTakeRows } from './batch-rows.ts';
 import { GBrainError, PAGE_SORT_SQL, ENRICH_ORDER_SQL } from './types.ts';
+import { finalizeLastSeen } from './chronicle/last-seen.ts';
 import { computeAnomaliesFromBuckets } from './cycle/anomaly.ts';
 import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
 import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, buildRecencyComponentSql, buildBestPerPagePoolCte } from './search/sql-ranking.ts';
@@ -3374,6 +3376,101 @@ export class PGLiteEngine implements BrainEngine {
       params
     );
     return result.rows as unknown as TimelineEntry[];
+  }
+
+  // ── v0.42.x Life Chronicle (#2390) timeline reads ───────────────────────
+  // Same result contract as the Postgres engine (parity is on results, not the
+  // builder idiom): JOIN depth page (deleted_at IS NULL), LEFT JOIN event page,
+  // hide soft-deleted event projections, order by COALESCE(event effective_date,
+  // date). Source scope: federated sourceIds[] > scalar sourceId > unscoped.
+  private pushChronicleSource(where: string[], params: unknown[], opts?: { sourceId?: string; sourceIds?: string[] }): void {
+    if (opts?.sourceIds && opts.sourceIds.length > 0) {
+      params.push(opts.sourceIds);
+      where.push(`p.source_id = ANY($${params.length}::text[])`);
+    } else if (opts?.sourceId) {
+      params.push(opts.sourceId);
+      where.push(`p.source_id = $${params.length}`);
+    }
+  }
+
+  private static CHRONICLE_SELECT = `
+    SELECT te.date::text AS date, te.summary, te.detail, te.source,
+           te.page_id, p.slug AS page_slug,
+           te.event_page_id, ep.slug AS event_slug,
+           ep.effective_date::text AS effective_date,
+           ep.frontmatter->'event'->>'kind' AS kind
+    FROM timeline_entries te
+    JOIN pages p ON p.id = te.page_id AND p.deleted_at IS NULL
+    LEFT JOIN pages ep ON ep.id = te.event_page_id`;
+
+  async getTimelineForDate(date: string, opts?: ChronicleTimelineOpts): Promise<ChronicleTimelineRow[]> {
+    const limit = opts?.limit ?? 200;
+    const params: unknown[] = [date];
+    const lower = opts?.week ? `date_trunc('week', $1::date)::date` : `$1::date`;
+    const upper = opts?.week ? `(date_trunc('week', $1::date) + interval '6 days')::date` : `$1::date`;
+    const where: string[] = [
+      `te.date >= ${lower}`,
+      `te.date <= ${upper}`,
+      `(te.event_page_id IS NULL OR ep.deleted_at IS NULL)`,
+    ];
+    this.pushChronicleSource(where, params, opts);
+    params.push(limit);
+    const result = await this.db.query(
+      `${PGLiteEngine.CHRONICLE_SELECT}
+       WHERE ${where.join(' AND ')}
+       ORDER BY COALESCE(ep.effective_date, te.date::timestamptz) ASC, te.id ASC
+       LIMIT $${params.length}`,
+      params,
+    );
+    return result.rows as unknown as ChronicleTimelineRow[];
+  }
+
+  async getSince(date: string, opts?: ChronicleTimelineOpts): Promise<ChronicleTimelineRow[]> {
+    const limit = opts?.limit ?? 200;
+    const params: unknown[] = [date];
+    const where: string[] = [
+      `te.date >= $1::date`,
+      `(te.event_page_id IS NULL OR ep.deleted_at IS NULL)`,
+    ];
+    if (opts?.kind) {
+      params.push(opts.kind);
+      where.push(`ep.frontmatter->'event'->>'kind' = $${params.length}`);
+    }
+    this.pushChronicleSource(where, params, opts);
+    params.push(limit);
+    const result = await this.db.query(
+      `${PGLiteEngine.CHRONICLE_SELECT}
+       WHERE ${where.join(' AND ')}
+       ORDER BY COALESCE(ep.effective_date, te.date::timestamptz) ASC, te.id ASC
+       LIMIT $${params.length}`,
+      params,
+    );
+    return result.rows as unknown as ChronicleTimelineRow[];
+  }
+
+  async getLastSeen(entitySlug: string, opts?: { asof?: string; sourceId?: string; sourceIds?: string[] }): Promise<LastSeenResult> {
+    const params: unknown[] = [entitySlug, `%${entitySlug}%`];
+    const where: string[] = [
+      `(te.event_page_id IS NULL OR ep.deleted_at IS NULL)`,
+      `(p.slug = $1 OR (ep.id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM jsonb_array_elements_text(
+            CASE WHEN jsonb_typeof(ep.frontmatter->'event'->'who') = 'array'
+                 THEN ep.frontmatter->'event'->'who' ELSE '[]'::jsonb END
+          ) AS w(name) WHERE w.name = $1 OR w.name LIKE $2)))`,
+    ];
+    this.pushChronicleSource(where, params, opts);
+    const result = await this.db.query(
+      `SELECT te.date::text AS last_date, ep.slug AS last_event_slug
+       FROM timeline_entries te
+       JOIN pages p ON p.id = te.page_id AND p.deleted_at IS NULL
+       LEFT JOIN pages ep ON ep.id = te.event_page_id
+       WHERE ${where.join(' AND ')}
+       ORDER BY COALESCE(ep.effective_date, te.date::timestamptz) DESC, te.id DESC
+       LIMIT 1`,
+      params,
+    );
+    const row = result.rows[0] as { last_date?: string; last_event_slug?: string } | undefined;
+    return finalizeLastSeen(entitySlug, row?.last_date ?? null, row?.last_event_slug ?? null, opts?.asof);
   }
 
   // Raw data

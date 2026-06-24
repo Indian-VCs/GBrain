@@ -5019,6 +5019,72 @@ const run_skillopt: Operation = {
   },
 };
 
+// ── v0.42.x — Life Chronicle (#2390) timeline read ops ───────────────────
+// CLI names avoid the existing `timeline` (get_timeline, a page's own timeline):
+// `gbrain day <date>` / `gbrain since <date>` / `gbrain last-seen <entity>`.
+// All route through sourceScopeOpts(ctx) so reads honor source isolation.
+const chronicle_day: Operation = {
+  name: 'chronicle_day',
+  description:
+    'Life Chronicle: events + timeline entries on a given day (or its ISO week when week=true), ' +
+    "ordered chronologically; each row backlinks to its depth page. Distinct from `get_timeline`/" +
+    "`gbrain timeline <slug>`, which shows ONE page's timeline. CLI: `gbrain day <date>`.",
+  scope: 'read',
+  params: {
+    date: { type: 'string', required: true, description: 'Day as YYYY-MM-DD.' },
+    week: { type: 'boolean', description: 'Expand to the ISO week (Mon–Sun) containing the date.' },
+    limit: { type: 'number', description: 'Max rows (default 200).' },
+  },
+  handler: async (ctx, p) => {
+    return ctx.engine.getTimelineForDate(String(p.date), {
+      week: p.week === true,
+      limit: typeof p.limit === 'number' ? p.limit : undefined,
+      ...sourceScopeOpts(ctx),
+    });
+  },
+  cliHints: { name: 'day', positional: ['date'] },
+};
+
+const chronicle_since: Operation = {
+  name: 'chronicle_since',
+  description:
+    'Life Chronicle: events + timeline entries on or after a date, optionally filtered by event kind. ' +
+    'CLI: `gbrain since <date> [--kind commitment]`.',
+  scope: 'read',
+  params: {
+    date: { type: 'string', required: true, description: 'Lower-bound day as YYYY-MM-DD (inclusive).' },
+    kind: { type: 'string', description: "Filter event projections by event.kind (e.g. 'commitment')." },
+    limit: { type: 'number', description: 'Max rows (default 200).' },
+  },
+  handler: async (ctx, p) => {
+    return ctx.engine.getSince(String(p.date), {
+      kind: typeof p.kind === 'string' ? p.kind : undefined,
+      limit: typeof p.limit === 'number' ? p.limit : undefined,
+      ...sourceScopeOpts(ctx),
+    });
+  },
+  cliHints: { name: 'since', positional: ['date'] },
+};
+
+const chronicle_last_seen: Operation = {
+  name: 'chronicle_last_seen',
+  description:
+    "Life Chronicle: when an entity was last seen — its own timeline rows OR an event's `who`. " +
+    'Returns last_date, the event slug, and days_ago. CLI: `gbrain last-seen <entity-slug>`.',
+  scope: 'read',
+  params: {
+    entity: { type: 'string', required: true, description: 'Entity page slug (e.g. people/sarah-chen).' },
+    asof: { type: 'string', description: 'Reference day YYYY-MM-DD for days_ago (default today).' },
+  },
+  handler: async (ctx, p) => {
+    return ctx.engine.getLastSeen(String(p.entity), {
+      asof: typeof p.asof === 'string' ? p.asof : undefined,
+      ...sourceScopeOpts(ctx),
+    });
+  },
+  cliHints: { name: 'last-seen', positional: ['entity'] },
+};
+
 export const operations: Operation[] = [
   // Page CRUD
   get_page, put_page, delete_page, list_pages,
@@ -5069,6 +5135,8 @@ export const operations: Operation[] = [
   whoami, sources_add, sources_list, sources_remove, sources_status,
   // v0.29: Salience + anomalies + recent transcripts
   get_recent_salience, find_anomalies, get_recent_transcripts,
+  // v0.42.x (#2390): Life Chronicle timeline reads
+  chronicle_day, chronicle_since, chronicle_last_seen,
   // v0.43 (#2095): push-based context
   volunteer_context,
   // v0.31: hot memory (facts table)

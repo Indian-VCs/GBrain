@@ -40,6 +40,7 @@ import type {
   SearchResult, SearchOpts,
   Link, GraphNode, GraphPath,
   TimelineEntry, TimelineInput, TimelineOpts,
+  ChronicleTimelineRow, ChronicleTimelineOpts, LastSeenResult,
   RawData,
   PageVersion,
   BrainStats, BrainHealth,
@@ -52,6 +53,7 @@ import type {
   EnrichCandidatesOpts, EnrichCandidate,
 } from './types.ts';
 import { GBrainError, PAGE_SORT_SQL, ENRICH_ORDER_SQL } from './types.ts';
+import { finalizeLastSeen } from './chronicle/last-seen.ts';
 import { computeAnomaliesFromBuckets } from './cycle/anomaly.ts';
 import * as db from './db.ts';
 import { ConnectionManager } from './connection-manager.ts';
@@ -3438,6 +3440,92 @@ export class PostgresEngine implements BrainEngine {
       WHERE p.slug = ${slug} ${sourceCond} ${afterCond} ${beforeCond}
       ORDER BY te.date DESC LIMIT ${limit}`;
     return rows as unknown as TimelineEntry[];
+  }
+
+  // ── v0.42.x Life Chronicle (#2390) timeline reads ───────────────────────
+  // Shared shape: timeline_entries JOIN depth page (deleted_at IS NULL) LEFT
+  // JOIN event page; hide soft-deleted event projections (read-time, not just
+  // doctor); order by COALESCE(event effective_date, date) for intra-day
+  // sequence. Source scope: federated sourceIds[] > scalar sourceId > unscoped.
+  private chronicleSourceCond(opts?: { sourceId?: string; sourceIds?: string[] }) {
+    const sql = this.sql;
+    return opts?.sourceIds && opts.sourceIds.length > 0
+      ? sql`AND p.source_id = ANY(${opts.sourceIds}::text[])`
+      : opts?.sourceId
+        ? sql`AND p.source_id = ${opts.sourceId}`
+        : sql``;
+  }
+
+  async getTimelineForDate(date: string, opts?: ChronicleTimelineOpts): Promise<ChronicleTimelineRow[]> {
+    const sql = this.sql;
+    const limit = opts?.limit ?? 200;
+    // ISO week (date_trunc('week') → Monday) or the single day.
+    const lower = opts?.week ? sql`date_trunc('week', ${date}::date)::date` : sql`${date}::date`;
+    const upper = opts?.week ? sql`(date_trunc('week', ${date}::date) + interval '6 days')::date` : sql`${date}::date`;
+    const rows = await sql`
+      SELECT te.date::text AS date, te.summary, te.detail, te.source,
+             te.page_id, p.slug AS page_slug,
+             te.event_page_id, ep.slug AS event_slug,
+             ep.effective_date::text AS effective_date,
+             ep.frontmatter->'event'->>'kind' AS kind
+      FROM timeline_entries te
+      JOIN pages p ON p.id = te.page_id AND p.deleted_at IS NULL
+      LEFT JOIN pages ep ON ep.id = te.event_page_id
+      WHERE te.date >= ${lower} AND te.date <= ${upper}
+        AND (te.event_page_id IS NULL OR ep.deleted_at IS NULL)
+        ${this.chronicleSourceCond(opts)}
+      ORDER BY COALESCE(ep.effective_date, te.date::timestamptz) ASC, te.id ASC
+      LIMIT ${limit}`;
+    return rows as unknown as ChronicleTimelineRow[];
+  }
+
+  async getSince(date: string, opts?: ChronicleTimelineOpts): Promise<ChronicleTimelineRow[]> {
+    const sql = this.sql;
+    const limit = opts?.limit ?? 200;
+    const kindCond = opts?.kind ? sql`AND ep.frontmatter->'event'->>'kind' = ${opts.kind}` : sql``;
+    const rows = await sql`
+      SELECT te.date::text AS date, te.summary, te.detail, te.source,
+             te.page_id, p.slug AS page_slug,
+             te.event_page_id, ep.slug AS event_slug,
+             ep.effective_date::text AS effective_date,
+             ep.frontmatter->'event'->>'kind' AS kind
+      FROM timeline_entries te
+      JOIN pages p ON p.id = te.page_id AND p.deleted_at IS NULL
+      LEFT JOIN pages ep ON ep.id = te.event_page_id
+      WHERE te.date >= ${date}::date
+        AND (te.event_page_id IS NULL OR ep.deleted_at IS NULL)
+        ${kindCond}
+        ${this.chronicleSourceCond(opts)}
+      ORDER BY COALESCE(ep.effective_date, te.date::timestamptz) ASC, te.id ASC
+      LIMIT ${limit}`;
+    return rows as unknown as ChronicleTimelineRow[];
+  }
+
+  async getLastSeen(entitySlug: string, opts?: { asof?: string; sourceId?: string; sourceIds?: string[] }): Promise<LastSeenResult> {
+    const sql = this.sql;
+    // "Seen" = the entity's own page has a timeline row, OR an event's `who`
+    // array references the entity (exact slug or wikilink-substring match).
+    const rows = await sql`
+      SELECT te.date::text AS last_date, ep.slug AS last_event_slug
+      FROM timeline_entries te
+      JOIN pages p ON p.id = te.page_id AND p.deleted_at IS NULL
+      LEFT JOIN pages ep ON ep.id = te.event_page_id
+      WHERE (te.event_page_id IS NULL OR ep.deleted_at IS NULL)
+        AND (
+          p.slug = ${entitySlug}
+          OR (ep.id IS NOT NULL AND EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(
+              CASE WHEN jsonb_typeof(ep.frontmatter->'event'->'who') = 'array'
+                   THEN ep.frontmatter->'event'->'who' ELSE '[]'::jsonb END
+            ) AS w(name)
+            WHERE w.name = ${entitySlug} OR w.name LIKE ${'%' + entitySlug + '%'}
+          ))
+        )
+        ${this.chronicleSourceCond(opts)}
+      ORDER BY COALESCE(ep.effective_date, te.date::timestamptz) DESC, te.id DESC
+      LIMIT 1`;
+    const row = rows[0] as { last_date?: string; last_event_slug?: string } | undefined;
+    return finalizeLastSeen(entitySlug, row?.last_date ?? null, row?.last_event_slug ?? null, opts?.asof);
   }
 
   // Raw data

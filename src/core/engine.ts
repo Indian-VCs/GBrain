@@ -4,6 +4,7 @@ import type {
   SearchResult, SearchOpts,
   Link, GraphNode, GraphPath, RelationalFanoutRow, RelationalFanoutOpts,
   TimelineEntry, TimelineInput, TimelineOpts,
+  ChronicleTimelineRow, ChronicleTimelineOpts, LastSeenResult,
   RawData,
   PageVersion,
   BrainStats, BrainHealth,
@@ -1381,6 +1382,16 @@ export interface BrainEngine {
    */
   addTimelineEntriesBatch(entries: TimelineBatchInput[], opts?: BatchOpts): Promise<number>;
   getTimeline(slug: string, opts?: TimelineOpts): Promise<TimelineEntry[]>;
+
+  // v0.42.x — Life Chronicle (#2390) timeline reads. All filter the depth page
+  // (and any event page) on deleted_at IS NULL, order by COALESCE(event
+  // effective_date, date), and honor source scope (sourceIds[] > sourceId).
+  /** Events/timeline rows on a given day (or its ISO week when opts.week). */
+  getTimelineForDate(date: string, opts?: ChronicleTimelineOpts): Promise<ChronicleTimelineRow[]>;
+  /** Events/timeline rows on or after `date`, optionally filtered by event.kind. */
+  getSince(date: string, opts?: ChronicleTimelineOpts): Promise<ChronicleTimelineRow[]>;
+  /** Most recent date an entity appears (its own page or an event's `who`). */
+  getLastSeen(entitySlug: string, opts?: { asof?: string; sourceId?: string; sourceIds?: string[] }): Promise<LastSeenResult>;
 
   // Raw data
   /**
