@@ -38,6 +38,62 @@ Every scoreboard row carries a `seam` label: the `openclaw` row exercises the sh
 - CLI exit codes for the new command route through the shared write-fence + aliveness-grace exit seam, so PGLite's WASM exit-code stomping and Bun's exit-time stdout discard can't corrupt the CI contract.
 
 To take advantage of v0.44.0.0: run `gbrain eval brainbench` — no setup, no keys, no brain required. If it ever reports something broken after an upgrade, `bun evals/brainbench/generator/gen.ts` rebuilds the corpus byte-identically and `gbrain eval brainbench --update-baseline` re-derives the baseline from an actual run; both are safe to re-run any time.
+## [0.42.55.0] - 2026-06-24
+
+**A security-hardening pass: routing dotfiles, the skills directory, page slugs, and large-file transcription are confined against multi-user-host and untrusted-input edge cases; dynamic OAuth client registration defaults to a consent-bearing grant; and a schema-lint migration brings existing brains to the fresh-install posture.** Several of these close community-reported gaps. Fresh installs were already covered; existing brains are brought to the same bar automatically on upgrade. If `gbrain doctor` flags anything afterward, its message names the object and the exact fix.
+
+### Fixed
+- **Walk-up routing dotfiles are trust-gated.** On a shared multi-user host, a `.gbrain-source` / `.gbrain-mount` found by the ancestor-directory walk is accepted only when it's owned by you (or root) and is neither a symlink nor world-writable — otherwise it's skipped, fail-closed. The working-directory match that routes by registered path now resolves symlinks on both sides, so a redirected directory can't misattribute your source or brain. (#418, contributed by @garagon)
+- **The skills directory is confined to its workspace.** Every skills-dir resolution tier now requires the resolved directory to stay within the declared workspace, so a redirected `skills` entry can't point the loader outside it. (#419, contributed by @garagon)
+- **Page slugs reject unsafe characters at the write boundary.** The shared slug validator now rejects control bytes, bidirectional/RTL overrides, backslashes, and URL-encoded path separators on top of the existing traversal check, and the file-write path confirms the target stays inside the source's working tree. Ordinary slugs — including non-Latin and CJK — are unaffected.
+- **Large-file transcription no longer builds shell command strings.** The segmentation path invokes `ffprobe`/`ffmpeg` with argument arrays and removes its temp directory through the filesystem API, so a media path is never parsed by a shell. (#245, contributed by @aliceagent)
+- **Superuser-connected fresh installs no longer abort during migration.** The RLS preflight in the schema migrations recognizes superuser and inherited-role privileges, not just the role's own flag. (#1385)
+
+### Changed
+- **Dynamic client registration defaults to the consent-bearing grant.** With Dynamic Client Registration enabled, a self-registered client now defaults to `authorization_code` (which goes through the approval screen) instead of `client_credentials`. Operators who need the machine-to-machine grant opt in with the new `--enable-dcr-insecure` flag, and a startup warning prints whenever registration is open. Registering clients via the CLI or admin API is unchanged. (#1353)
+
+### Added
+- **Migration v120 — schema-lint hardening.** Brings existing brains to the fresh-install posture: the `page_links` view runs with the caller's privileges on Postgres, and the gbrain-owned trigger/event functions pin their schema search path on both engines. A new CI guard keeps new trigger functions from regressing. (#1647, #171)
+
+### To take advantage of v0.42.55.0
+`gbrain upgrade`, then `gbrain apply-migrations --yes` (or any command that opens the brain) to pick up migration v120 — no manual step, all on by default. Fresh installs already carry every change. The hardening applies automatically; `--enable-dcr-insecure` is the explicit escape hatch if you genuinely need the machine-to-machine OAuth grant.
+
+## [0.42.53.0] - 2026-06-23
+
+**`gbrain sync` works again on managed Postgres brains: the durable-checkpoint pin write was encoding its value the wrong way, so every multi-source sync aborted at the very first checkpoint. Fixed, plus a repo-wide sweep of the same JSONB footgun and a new CI guard so it can't come back.** A recent release added a structural check on the sync checkpoint table; the pin write that runs before every drain bound its value as a string rather than a real array, so the check rejected it and the run bailed before importing anything. The bug was invisible on the embedded engine (its driver parses the value either way) and only bit managed Postgres.
+
+### Fixed
+- **Multi-source sync no longer aborts at the first checkpoint.** The sync-target pin write now binds its value so Postgres stores a genuine JSONB array instead of a double-encoded string scalar. A dedicated Postgres CI job exercises this on a real database, because the embedded test engine masks the failure — which is exactly why it shipped.
+- **The same JSONB double-encode footgun is swept across the codebase.** Every raw write that serialized a value into a JSONB column the bug-prone way is corrected to the safe form (search cache, source config, calibration profiles, subagent tool records, eval receipts, code-intel cache, symbol resolver, and others). Readers were already defensive, so existing rows self-heal as each is rewritten.
+- **`gbrain eval suspected-contradictions` no longer crashes on an exact-alias query.** An alias-matched result was missing its page id, which aborted the whole probe on Postgres; the id is now carried through, with a finite-id filter as a defensive backstop.
+
+### Added
+- **A CI guard for the positional JSONB double-encode pattern.** The existing guard caught only the template-string spelling; a new static check (`scripts/check-jsonb-params.mjs`) catches the positional-parameter form — the one behind this wave — across the codebase, with its own self-test. The embedded engine's native path is intentionally not flagged, since the bug can't occur there.
+
+### To take advantage of v0.42.53.0
+`gbrain upgrade`. Multi-source Postgres brains that had stopped syncing resume on the next `gbrain sync` — no migration, no manual step. Rows written in the double-encoded form before the fix self-heal as each is rewritten; re-running the affected write (or a sync) repairs them eagerly if you'd rather not wait.
+
+## [0.42.52.0] - 2026-06-18
+
+**Autopilot stops manufacturing dead jobs and wedging its own queue, plus four operational rough edges get fixed: minion attempt-accounting, `agent run` flag parsing, honest `sources status`, and a budgeted `gbrain status`.** On a multi-source Postgres brain, autopilot could fan out a continuous stream of dead `autopilot-cycle` jobs while the supervisor periodically wedged the very queue it exists to keep alive. The root cause was one disease with several interacting parts; this wave addresses all of them, then cleans up four smaller reliability bugs found alongside.
+
+### Changed
+- **Autopilot runs one brain-wide maintenance pass, not one per source.** The cycle is split: per-source jobs run only source-scoped phases, and a single `autopilot-global-maintenance` job runs the brain-wide phases once per window. This removes the per-cycle memory blow-up that was the shared root cause of the dead-job storm and the queue wedge. Per-source filesystem phases bind to the source's own path, so the freshness stamp and the work agree on which source ran.
+- **The supervisor self-heals instead of giving up.** A transient database blip no longer trips the crash-budget breaker into a permanent stop; the supervisor degrades to capped-backoff retry and recovers, with a hard ceiling as the backstop. It detects a live sibling supervisor through the queue's database lock (not a `$HOME`-derived pidfile), so two supervisors under a split home directory can't both claim the queue.
+- **`gbrain sources status` tells a running sync apart from an idle source.** A source holding a live sync lock now reads as actively syncing instead of "idle," matching the honest-freshness signal `gbrain doctor` already shows.
+
+### Added
+- **Per-source failure cooldown + fan-out clamp.** A source that fails backs off (bounded exponential) instead of being re-dispatched every tick; per-tick fan-out is clamped to the worker concurrency, with a `gbrain doctor` check that warns on a mismatch.
+- **`gbrain status --deadline-ms` / `--fast`.** A budgeted status snapshot returns whatever sections completed within the budget (marked partial) instead of hanging a poller; the JSON envelope also carries the CLI `version`.
+- **A sync stall watchdog.** If the import drain makes no forward progress for `GBRAIN_SYNC_STALL_ABORT_SECONDS` (default 900), the run aborts and releases its per-source lock so the next `gbrain sync` resumes from the checkpoint — no manual `pkill`. It keys off import progress (not the lock heartbeat) and reports a distinct `stall_timeout` reason. (Limit: a hang inside a single file's import is observed between files, not mid-file; the wall-clock deadline remains the backstop there.)
+
+### Fixed
+- **A timed-out minion run counts as a spent attempt.** Wall-clock dead-lettering already did; the per-job timeout path didn't, so long-lane jobs (subagent / embed-backfill / autopilot-cycle) could read `attempts: 0/N (started: N)`. Accounting is now honest across all dead-letter paths.
+- **`gbrain agent run` no longer swallows flags after the prompt.** A trailing `--detach` / `--follow` is recognized instead of being captured into the prompt string; a `--word` inside the prompt stays verbatim, and an explicit `--` ends flag parsing anywhere.
+
+### To take advantage of v0.42.52.0
+`gbrain upgrade`. Existing brains pick up the cycle split, supervisor backoff, and per-source cooldown on the next autopilot tick (one catch-up global-maintenance pass on the first tick) — no migration, all on by default. Tune the sync stall watchdog with `GBRAIN_SYNC_STALL_ABORT_SECONDS` if 900s doesn't fit your largest files; budget a status poller with `gbrain status --fast` or `--deadline-ms=<n>`.
+
 ## [0.42.51.0] - 2026-06-17
 
 **`gbrain sync` stops bottlenecking all its workers on a single database row, a malformed checkpoint can no longer wedge a source, and `gbrain doctor` tells an actively-running sync apart from a stuck one.** A slow source that fell behind HEAD could read as permanently stale even while it imported every cycle: sync was single-core-bound at the database layer, so handing it more workers didn't help, and the freshness check couldn't see that a sync was in fact running.

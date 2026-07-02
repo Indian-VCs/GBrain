@@ -16,6 +16,27 @@ Deferred from the BrainBench wave (eng-reviewed; plan + GSTACK REVIEW REPORT at
 - [ ] **Periodic re-baselining (the ratchet doesn't auto-tighten).** Improvements aren't banked into master's baseline until a PR updates it, so a regression back to a stale baseline level passes. Documented as an accepted residual in `docs/eval/BRAINBENCH.md`; the fix is an operator habit or a scheduled job that re-runs `--update-baseline` after metric-improving merges. Priority: P3.
 
 - [ ] **Hermetic-ize the 7 env-sensitive LLM-availability tests.** `test/think-gateway-adapter.test.ts`, `test/conversation-parser/llm-base.test.ts`/`llm-fallback.test.ts`, `test/doctor-ze-checks.test.ts` assert behavior "when ANTHROPIC_API_KEY is unset" by reading the live process env — they fail on any dev shell that exports provider keys (verified failing on clean master in such a shell; green in keyless CI). Stub/save-restore the env per test so local runs match CI. Priority: P2.
+## reliability fix-wave follow-ups (filed v0.42.52.0)
+
+Deferred from the autopilot/supervisor + sync/status/minion reliability wave
+(plan-eng-review + codex + adversarial diff review CLEARED). Both surfaced by the
+ship-stage pre-landing review; neither blocks the wave.
+
+- [ ] **P2 — Thread a cancellation signal through `importFile` (#1950).** The sync
+  stall watchdog aborts `opts.signal`, but the per-iteration abort checks observe
+  it BETWEEN files — a hang inside one `importFile` call (e.g. a stuck embed
+  network request) isn't interrupted until that call returns. Thread an
+  `AbortSignal` into `importFromContent`/`importFromFile` and check it at the async
+  phase boundaries (post-parse, pre-embed, pre-DB-write) so an in-flight wedge is
+  reaped too. Core hot path (engine-parity + downstream-client surface) — scope it
+  on its own. Where: `src/core/import-file.ts`, `src/commands/sync.ts`.
+- [ ] **P3 — Centralize live-sync liveness onto `liveSyncStatus` (#1950).**
+  `gbrain sources status` now uses the shared `liveSyncStatus(engine, sourceId)`
+  helper; retrofit `gbrain doctor` (its own inline lock probe) and `gbrain status`
+  onto the same helper so there's one source of truth for "is this source
+  syncing." Where: `src/core/db-lock.ts`, `src/commands/doctor.ts`,
+  `src/commands/status.ts`.
+
 ## Pace Mode follow-ups (filed v0.42.49.0)
 
 Deferred from the paced-backfill wave (CEO + eng review CLEARED). Core shipped:
@@ -73,17 +94,23 @@ job) and sync. See CLAUDE.md "Pace Mode".
   `get_timeline` through the federated source scope and taught the engine methods to honor
   `sourceIds[]`. The adversarial review (Codex + Claude) flagged sibling read ops in the
   SAME class that still use scalar-only `ctx.sourceId ? {sourceId} : {}` and never thread
-  `ctx.auth.allowedSources`: `get_chunks`, `get_raw_data`, `get_versions`, and `resolve_slugs`
-  (the standalone op — `resolve_slugs` passes NO scope at all). A remote federated client
-  (grant set, dispatch-default `ctx.sourceId='default'`) reads these against `default` or
-  unscoped, not its grant.
+  `ctx.auth.allowedSources`: `get_chunks`, `get_raw_data`, `get_versions`, `resolve_slugs`
+  (the standalone op — `resolve_slugs` passes NO scope at all), plus (per the v0.42.55.0
+  eng-review codex pass) `takes_search` (`operations.ts:1727` — holder-allowlist only, no
+  `sourceScopeOpts`) and `code_def` (`operations.ts:4155` — brain-wide raw SQL over
+  `content_chunks`; confirm whether brain-wide is intentional before scoping). A remote
+  federated client (grant set, dispatch-default `ctx.sourceId='default'`) reads these against
+  `default` or unscoped, not its grant.
   - **Why:** same cross-source correctness/isolation class #2200 targets; a federated client
-    can't read chunks/raw-data/versions for an authorized non-default source, and `resolve_slugs`
-    can fuzzy-resolve across all sources.
+    can't read chunks/raw-data/versions for an authorized non-default source, `resolve_slugs`
+    can fuzzy-resolve across all sources, and `takes_search`/`code_def` query without the grant.
+    The #2399 close-list deliberately did NOT blanket-close #1371/#2200 because of these residual
+    surfaces — close those issues only after this TODO lands.
   - **How to start:** mirror the #2200 pattern — route each handler through `sourceScopeOpts(ctx)`
     (or `linkReadScopeOpts` if a far endpoint exists), add `sourceIds?: string[]` to the engine
-    methods (`getChunks` / `getRawData` / `getVersions` / `resolveSlugs`) with `source_id = ANY($::text[])`
-    precedence, and add federated/isolation tests + engine-parity arms.
+    methods (`getChunks` / `getRawData` / `getVersions` / `resolveSlugs` / the takes-search +
+    code-def queries) with `source_id = ANY($::text[])` precedence, and add federated/isolation
+    tests + engine-parity arms.
   - **Depends on:** nothing; #2200 established the pattern and the `linkReadScopeOpts` helper.
 
 ## Spend-controls wave follow-ups (filed v0.42.45.0, #2139)
