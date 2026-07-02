@@ -91,11 +91,11 @@ export function formatEmbeddingCredsError(d: EmbeddingDiagnosis): string {
         '  Or run with --no-embed to import-only and embed later.',
       ].join('\n');
 
-    case 'user_provided_model_unset':
+    case 'user_provided_dims_unset':
       return [
-        `Provider "${d.provider}" requires a specific model name to be configured.`,
+        `Provider "${d.provider}" ships no default embedding dimension; set one explicitly.`,
         '',
-        `  Set one: gbrain config set embedding_model ${d.provider}:<model-name>`,
+        `  Set it: gbrain config set embedding_dimensions <N>`,
         '  Or run with --no-embed to import-only and embed later.',
       ].join('\n');
 
