@@ -141,19 +141,23 @@ Set `ZHIPUAI_API_KEY`. Models: `embedding-3` (current; Matryoshka 256-2048 dims)
 
 No env required — Ollama runs unauthenticated locally. Optional `OLLAMA_BASE_URL` (default `http://localhost:11434/v1`) and `OLLAMA_API_KEY` (for auth-enabled deployments).
 
-Recipe ships with `nomic-embed-text` (768d, recommended), `mxbai-embed-large` (1024d), `all-minilm` (384d). `gbrain providers test --model ollama:nomic-embed-text` smoke-tests the local install.
+Recipe ships with `nomic-embed-text` (768d, recommended), `mxbai-embed-large` (1024d), `all-minilm` (384d), plus the larger modern embedders `qwen3-embed-8b` (4096d) and `snowflake-arctic-embed-l-v2` (1024d). `gbrain providers test --model ollama:nomic-embed-text` smoke-tests the local install.
+
+The recipe default is `nomic-embed-text`'s 768 dims. If you run one of the larger models, declare its native dimension with `--embedding-dimensions <N>` at init — gbrain trusts the value you declare for local recipes instead of rejecting a non-768 width.
 
 ### llama-server (local, llama.cpp)
 
 `llama.cpp`'s `llama-server --embeddings` endpoint. No env required. Optional `LLAMA_SERVER_BASE_URL` (default `http://localhost:8080/v1`) and `LLAMA_SERVER_API_KEY`.
 
-User-driven models: launch llama-server with `--model <gguf-path> --embeddings`, then run `gbrain init --embedding-model llama-server:<your-id> --embedding-dimensions <N>`. The recipe refuses the implicit shorthand `--model llama-server` because there's no canonical first model.
+User-driven models: launch llama-server with `--model <gguf-path> --embeddings`, then run `gbrain init --embedding-model llama-server:<your-id> --embedding-dimensions <N>`. gbrain trusts the dimension you declare (you know the GGUF you launched); the recipe refuses the implicit shorthand `--model llama-server` because there's no canonical first model.
 
 ### LiteLLM proxy (universal escape hatch)
 
 Run [LiteLLM](https://docs.litellm.ai/docs/proxy/quick_start) in front of any provider — Bedrock, Vertex, Cohere, Jina, Fireworks, OctoAI, etc. The proxy normalizes everything to the OpenAI-compatible API; gbrain points at the proxy via `LITELLM_BASE_URL` and proxies the call.
 
 This is the catch-all for "my provider isn't in the list above." Set up LiteLLM, then `gbrain init --embedding-model litellm:<your-model-id> --embedding-dimensions <N>`.
+
+**Include the `/v1` suffix in `LITELLM_BASE_URL` if your proxy serves the OpenAI route there** (e.g. `http://localhost:4000/v1`). Many LiteLLM deployments expose the OpenAI-compatible API only under `/v1`; pointing gbrain at the bare host 404s or fails authentication with no hint. gbrain trusts the dimension you declare for the proxy-backed model — the proxy's backend, not gbrain, decides the true width — so `--embedding-dimensions <N>` is required and accepted as-is.
 
 ## Choosing dimensions
 
