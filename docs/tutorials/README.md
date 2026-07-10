@@ -8,6 +8,7 @@ Step-by-step walkthroughs that take you from zero to a working outcome. Concrete
 - [**Set up GBrain as your company brain**](company-brain.md) — federated, multi-user, OAuth-scoped institutional memory for a 10-50 person team. Three sources (shared / customers / internal-only), per-user scope, first synthesized query as a teammate. About 90 minutes end-to-end, about $5 in API calls for the demo, under $100 a month sustained for a 25-person company.
 - [**Auto-improve a skill with `gbrain skillopt`**](improving-skills-with-skillopt.md) — treat a `SKILL.md` as the trainable parameter of a frozen agent. Write your first benchmark from scratch (the part everyone gets stuck on), preview the cost, run the optimizer, read accepted vs no_improvement vs aborted, and accept a measurably better skill. About 20 minutes, about $1 in API calls. Reference: [`../guides/skillopt.md`](../guides/skillopt.md).
 - [**Give your coding agent a memory: GBrain + Claude Code / Codex**](connect-coding-agent.md) — the two-funnel walkthrough for coding-agent users. Path A: connect Claude Code / Codex to a brain you already run (OpenClaw, Hermes, any `gbrain serve --http`). Path B: start from nothing with a 2-second local PGLite brain. Both end with the brain-first protocol you paste into `CLAUDE.md` / `AGENTS.md` and the four habits (brain-first lookup, ambient capture, briefing-from-your-brain, whoknows) that make it worth it. About 10 minutes.
+- [**Local personal brain on a $20 Claude subscription**](local-brain-claude-pro.md) — the near-zero-cost path. GBrain on local PGLite, embeddings generated on-device by Ollama (`nomic-embed-text`), wired into Claude Code over MCP. No Render, no OpenClaw, no Telegram — your only recurring cost is the $20/mo Claude Pro plan. About 15 minutes.
 
 ## In progress
 
@@ -18,8 +19,6 @@ These are the next tutorials on the roadmap. Open an issue if one of them is the
 - **Migrate your existing vault into GBrain** — for Notion / Obsidian / Roam users with a vault that doesn't match GBrain's default layout. Walks through `gbrain schema detect` → `suggest` → `review-candidates` so the brain learns your shape instead of forcing you to learn its.
 
 - **Index your codebase as a code brain** — for developers. Initialize a brain in a code repo, swap to `voyage-code-3` for embeddings, use `gbrain code-def` / `gbrain code-refs` / `gbrain code-callers` to navigate the codebase semantically from any MCP-aware editor.
-
-- **Run GBrain fully local with Ollama or llama.cpp** — for privacy-first deployments. No cloud calls, no API keys, no telemetry. Trades some retrieval quality for full local control. Useful for regulated industries, air-gapped environments, or just paranoia.
 
 - **Set up the dream cycle** — the overnight enrichment daemon that makes the brain self-maintaining. Fixes citations, dedupes people pages, surfaces contradictions, generates founder scorecards on the schedule you configure. The piece that turns a static knowledge base into a brain that gets smarter while you sleep.
 
