@@ -6,7 +6,7 @@ This is the install I'd run if I were setting up the whole stack from scratch to
 
 > "This is the Apple I, we're just soldering breadboards over here."
 
-If you only want the **brain layer** (no agent, no Telegram, just gbrain as memory for an MCP client you already use), skip to the [CLI standalone install](../INSTALL.md#2-cli-standalone) in INSTALL.md. If you want the whole agent **shared with a team**, read the [company brain tutorial](company-brain.md) instead. This tutorial is the solo, full-stack, talk-to-it-on-Telegram path.
+If you only want the **brain layer** (no agent, no Telegram, just gbrain as memory for an MCP client you already use), skip to the [CLI standalone install](../INSTALL.md#2-cli-standalone) in INSTALL.md. For a fully local, near-zero-cost variant — brain on local PGLite, embeddings on-device via Ollama, driven by Claude Code on just a **$20/mo Claude subscription** (no Render, no OpenClaw, no Telegram) — follow [local-brain-claude-pro.md](local-brain-claude-pro.md) instead. If you want the whole agent **shared with a team**, read the [company brain tutorial](company-brain.md) instead. This tutorial is the solo, full-stack, talk-to-it-on-Telegram path.
 
 ---
 
